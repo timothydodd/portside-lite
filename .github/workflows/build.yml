@@ -1,0 +1,260 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  # Test builds on demand from any branch (Actions > Build > Run workflow). Never signed. Versioned
+  # 0.0.<run> (which the installer refuses to put over an installed release) unless a version is given.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for this test build (x.y.z). Empty: 0.0.<run>"
+        type: string
+        default: ""
+
+# Least privilege: jobs ask for more only where they need it (OIDC for signing, write to publish the
+# GitHub release).
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Third-party actions are pinned to a commit (tag in the comment) so a moved tag cannot change
+      # what runs in this pipeline.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # One version for everything: tags use the tag, manual runs their input or 0.0.<run>.
+      - name: Version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          } elseif ($env:INPUT_VERSION -match '^\d+\.\d+\.\d+$') {
+            $version = $env:INPUT_VERSION
+          } else {
+            $version = "0.0.${{ github.run_number }}"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z (got ${{ github.ref_name }})" }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+          # Stamped into the executable's version resource by tauri build.
+          @{ version = $version } | ConvertTo-Json | Set-Content src-tauri/tauri.version.json
+          Write-Host "Version $version"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend type check
+        run: npx tsc --noEmit
+
+      # The Tauri-free crates hold the logic; their tests run everywhere.
+      - name: Test
+        run: cargo test -p portside-core -p portside-store -p portside-kube -p portside-monitor
+
+      # Builds the frontend (beforeBuildCommand) and the release executable. The installer is
+      # built separately (Inno Setup) so the executable can be signed first.
+      - name: Build app
+        run: npx tauri build --no-bundle --config src-tauri/tauri.version.json
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: portside-lite-exe
+          path: target/release/portside-lite.exe
+          if-no-files-found: error
+
+  # Tag builds and manual runs: signing (tags only) and the installer.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # The 'release' environment only admits v* tags and requires a reviewer's approval before this
+    # job starts, and Azure only trusts jobs in that environment (the subject of the federated
+    # credential). So nothing but an approved release tag can be signed or published.
+    # Manual runs use no environment: unsigned, never published.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
+    permissions:
+      contents: read
+      # Signs in to Azure without a stored secret (OIDC) for code signing.
+      id-token: write
+
+    # Code signing (Azure Trusted Signing) switches itself on once these exist; until then every
+    # signing step is skipped and the outputs are unsigned.
+    #   secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID  (app registration with a
+    #              federated credential for this repo's 'release' environment and the "Trusted Signing
+    #              Certificate Profile Signer" role on the certificate profile)
+    #   variables: SIGNING_ENDPOINT (e.g. https://eus.codesigning.azure.net/), SIGNING_ACCOUNT,
+    #              SIGNING_PROFILE (the certificate profile; set last, it is what turns signing on)
+    env:
+      SIGN: ${{ secrets.AZURE_CLIENT_ID != '' && vars.SIGNING_ACCOUNT != '' && vars.SIGNING_PROFILE != '' && startsWith(github.ref, 'refs/tags/v') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          } elseif ($env:INPUT_VERSION -match '^\d+\.\d+\.\d+$') {
+            $version = $env:INPUT_VERSION
+          } else {
+            $version = "0.0.${{ github.run_number }}"
+          }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: portside-lite-exe
+          path: build
+
+      - name: Stage installer files
+        shell: pwsh
+        run: ./packaging/Build-Installer.ps1 -Step Stage -Version "${{ env.APP_VERSION }}" -Exe build/portside-lite.exe
+
+      - name: Azure login (code signing)
+        if: env.SIGN == 'true'
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Sign the executable before it is packed into the installer and the portable zip. Only our own
+      # exe: the staged WebView2 bootstrapper is already signed by Microsoft.
+      - name: Sign the executable
+        if: env.SIGN == 'true'
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\artifacts\installer-stage\portside-lite.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          ./packaging/Build-Installer.ps1 -Step Compile -Version "${{ env.APP_VERSION }}" -Output artifacts
+
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: artifacts
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Package portable zip
+        shell: pwsh
+        run: Compress-Archive -Path artifacts/installer-stage/portside-lite.exe -DestinationPath "artifacts/PortsideLite-${{ env.APP_VERSION }}-win-x64-portable.zip"
+
+      # After signing, so the published hashes match the files people download.
+      - name: Hash the downloads
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem artifacts -File | Where-Object { $_.Name -like "PortsideLite-*" } | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          $lines
+          # LF endings, or "sha256sum -c" on Linux/macOS reads the file names with a trailing CR.
+          [System.IO.File]::WriteAllText("$PWD/artifacts/SHA256SUMS.txt", (($lines -join "`n") + "`n"))
+
+      - name: Report signing
+        shell: pwsh
+        run: |
+          foreach ($f in @("artifacts/installer-stage/portside-lite.exe") + (Get-ChildItem artifacts -Filter "PortsideLite-Setup-*.exe").FullName) {
+            $s = Get-AuthenticodeSignature $f
+            Write-Host ("{0}: {1} {2}" -f (Split-Path $f -Leaf), $s.Status, $s.SignerCertificate.Subject)
+            if ($env:SIGN -eq 'true' -and $s.Status -ne 'Valid') { throw "$f is not validly signed" }
+          }
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: portside-lite-release
+          path: |
+            artifacts/PortsideLite-Setup-*.exe
+            artifacts/PortsideLite-*-portable.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # Installs, runs, upgrades and uninstalls the installer just built on a clean runner.
+  installer-smoke:
+    needs: release
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: portside-lite-release
+          path: installers
+
+      - name: Install, run, upgrade, uninstall
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installers -Filter "PortsideLite-Setup-*.exe" | Select-Object -First 1
+          if (-not $setup) { throw "No installer was built." }
+          ./packaging/Test-Installer.ps1 -Installer $setup.FullName -LogDir "$env:RUNNER_TEMP/installer-logs"
+
+      - name: Upload setup logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-logs
+          path: ${{ runner.temp }}/installer-logs/
+
+  # Only this job can write to the repository, and only for an approved tag whose installer passed
+  # the smoke test.
+  github-release:
+    needs: [release, installer-smoke]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: portside-lite-release
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            artifacts/PortsideLite-Setup-*.exe
+            artifacts/PortsideLite-*-portable.zip
+            artifacts/SHA256SUMS.txt
+          generate_release_notes: true

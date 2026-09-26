@@ -1,0 +1,17 @@
+[package]
+name = "portside-kube"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+http = "1.5.0"
+k8s-openapi = { version = "0.28.0", features = ["latest"] }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "ring"] }
+portside-core = { path = "../portside-core" }
+russh = { version = "0.63.3", default-features = false, features = ["ring", "flate2", "rsa"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9.34"
+thiserror = { workspace = true }
+tokio = { workspace = true }

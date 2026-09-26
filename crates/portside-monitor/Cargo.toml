@@ -1,0 +1,13 @@
+[package]
+name = "portside-monitor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+portside-core = { path = "../portside-core" }
+portside-kube = { path = "../portside-kube" }
+portside-store = { path = "../portside-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
