@@ -125,6 +125,8 @@ It switches on once these exist on the repo (until then releases are unsigned):
 - **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
 - **Variables:** `SIGNING_ENDPOINT`, `SIGNING_ACCOUNT`, `SIGNING_PROFILE`
 - **In Azure:** the app registration needs a federated credential for
-  `repo:timothydodd/portside-lite:environment:release` and the *Trusted Signing Certificate
-  Profile Signer* role on the certificate profile.
+  `repo:timothydodd@8201238/portside-lite@1389857470:environment:release` and the *Trusted
+  Signing Certificate Profile Signer* role on the certificate profile. This repo uses GitHub's
+  immutable-ID OIDC subject (`owner@id/repo@id`), not the older `repo:owner/repo` form; check
+  `gh api repos/timothydodd/portside-lite/actions/oidc/customization/sub` for the prefix.
 
