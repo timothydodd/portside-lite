@@ -43,16 +43,6 @@ async function exportAll(kind: string, namespace: string | null) {
   }
 }
 
-async function exportOne(kind: string, namespace: string, name: string) {
-  try {
-    const y = await ipc.exportManifests(kind, namespace, name);
-    const path = await saveYamlFile(`${name}.${kind.toLowerCase()}.yaml`, y);
-    if (path) toast.success(`Exported to ${path}`);
-  } catch (e) {
-    toast.error(errorMessage(e));
-  }
-}
-
 export default function WorkloadsPage() {
   const [kind, setKind] = useState<WorkloadInfo["kind"]>("Deployment");
   const [namespace, setNamespace] = useState("");
@@ -118,7 +108,7 @@ function WorkloadTable({
   openPod: (ns: string, name: string) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const { openEditor, openCopy } = useNavStore();
+  const { openEditor, openCopy, openExport } = useNavStore();
   const sorted = useMemo(() => {
     const rank = { critical: 0, warning: 1, good: 2, muted: 3 };
     return [...rows].sort((a, b) => rank[health(a).tone] - rank[health(b).tone] || a.name.localeCompare(b.name));
@@ -165,7 +155,7 @@ function WorkloadTable({
                     <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: w.kind, namespace: w.namespace, name: w.name })}>
                       <FileCode2 size={14} />
                     </button>
-                    <button className="btn-quiet" title="Export YAML to a file" onClick={() => void exportOne(w.kind, w.namespace, w.name)}>
+                    <button className="btn-quiet" title="Export with its Services and config" onClick={() => openExport({ kind: w.kind, namespace: w.namespace, name: w.name })}>
                       <Download size={14} />
                     </button>
                     <button className="btn-quiet" title="Copy to another cluster or namespace" onClick={() => openCopy({ kind: w.kind, namespace: w.namespace, name: w.name })}>

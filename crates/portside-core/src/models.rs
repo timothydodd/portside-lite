@@ -16,6 +16,9 @@ pub struct ClusterSnapshot {
     pub pods: Vec<PodInfo>,
     pub workloads: Vec<WorkloadInfo>,
     pub volumes: Vec<VolumeClaimInfo>,
+    pub services: Vec<ServiceInfo>,
+    /// ConfigMaps and Secrets. Key names and sizes only, never values.
+    pub configs: Vec<ConfigInfo>,
     /// Recent Warning events, newest first.
     pub events: Vec<EventInfo>,
     pub issues: Vec<Issue>,
@@ -164,6 +167,56 @@ pub struct VolumeClaimInfo {
     pub storage_class: Option<String>,
     pub capacity: Option<String>,
     pub volume_name: Option<String>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePort {
+    pub name: Option<String>,
+    pub port: i32,
+    pub target_port: Option<String>,
+    pub node_port: Option<i32>,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceInfo {
+    pub namespace: String,
+    pub name: String,
+    /// ClusterIP | NodePort | LoadBalancer | ExternalName
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub cluster_ip: Option<String>,
+    /// Load-balancer IPs/hostnames, external IPs, or the ExternalName target.
+    pub external: Vec<String>,
+    pub ports: Vec<ServicePort>,
+    pub selector: std::collections::BTreeMap<String, String>,
+    /// Pods the selector matches (running, not terminating).
+    pub pods_matched: usize,
+    /// Of those, pods that are Ready (receiving traffic).
+    pub pods_ready: usize,
+    pub pod_names: Vec<String>,
+    /// "host/path (ingress-name)" for each Ingress rule routing here.
+    pub routes: Vec<String>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigInfo {
+    /// ConfigMap | Secret
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    /// Secrets: Opaque, kubernetes.io/tls, helm.sh/release.v1, …
+    pub secret_type: Option<String>,
+    pub keys: Vec<String>,
+    pub size_bytes: usize,
+    pub immutable: bool,
+    /// Workloads whose pod spec references it, as "Kind/name".
+    pub used_by: Vec<String>,
     pub created_ms: Option<i64>,
 }
 

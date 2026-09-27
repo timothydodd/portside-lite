@@ -49,6 +49,9 @@ impl EventSink for TauriSink {
             let _ = tray.set_tooltip(Some(tooltip));
         }
     }
+    fn forwards_changed(&self, forwards: &[portside_monitor::forwards::ForwardInfo]) {
+        let _ = self.0.emit("forwards:changed", forwards);
+    }
 }
 
 pub struct AppState {
@@ -183,7 +186,10 @@ pub fn run() {
             commands::edit_manifest,
             commands::apply_manifest,
             commands::save_text_file,
-            commands::workload_references,
+            commands::related_objects,
+            commands::export_bundle,
+            commands::get_config,
+            commands::save_config,
             commands::copy_to_cluster,
             commands::set_workload_disabled,
             commands::delete_workload,
@@ -193,6 +199,9 @@ pub fn run() {
             commands::read_text_files,
             commands::parse_manifests,
             commands::import_manifests,
+            commands::start_port_forward,
+            commands::stop_port_forward,
+            commands::list_port_forwards,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

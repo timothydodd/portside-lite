@@ -8,7 +8,7 @@ import SnapshotGate from "../components/SnapshotGate";
 import { EmptyState, NamespaceSelect, PageHeader, SearchInput, SeverityBadge } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
 
-const CATEGORIES = ["pod", "node", "workload", "storage", "event", "logs"] as const;
+const CATEGORIES = ["pod", "node", "workload", "network", "storage", "event", "logs"] as const;
 
 export default function ProblemsPage() {
   const [view, setView] = useState<"live" | "history">("live");

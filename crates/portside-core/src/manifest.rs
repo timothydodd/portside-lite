@@ -29,9 +29,65 @@ fn strip_meta(meta: &mut Value, keep_resource_version: bool) {
     }
 }
 
+/// Annotations the PV controller adds when binding a claim.
+const PVC_BINDING_ANNOTATIONS: &[&str] = &[
+    "pv.kubernetes.io/bind-completed",
+    "pv.kubernetes.io/bound-by-controller",
+    "volume.beta.kubernetes.io/storage-provisioner",
+    "volume.kubernetes.io/storage-provisioner",
+    "volume.kubernetes.io/selected-node",
+];
+
+/// Fields the cluster assigns per kind, which would conflict or pin the
+/// object to this cluster if applied elsewhere.
+fn strip_cluster_assigned(obj: &mut Value) {
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or_default().to_string();
+    match kind.as_str() {
+        "Service" => {
+            let service_type = obj
+                .pointer("/spec/type")
+                .and_then(Value::as_str)
+                .unwrap_or("ClusterIP")
+                .to_string();
+            if let Some(Value::Object(spec)) = obj.get_mut("spec") {
+                for k in ["clusterIP", "clusterIPs", "healthCheckNodePort"] {
+                    spec.remove(k);
+                }
+                // NodePort services usually pin their node ports on purpose; for
+                // the other types they're auto-assigned and may clash elsewhere.
+                if service_type != "NodePort" {
+                    if let Some(Value::Array(ports)) = spec.get_mut("ports") {
+                        for p in ports.iter_mut().filter_map(Value::as_object_mut) {
+                            p.remove("nodePort");
+                        }
+                    }
+                }
+            }
+        }
+        "PersistentVolumeClaim" => {
+            if let Some(Value::Object(spec)) = obj.get_mut("spec") {
+                spec.remove("volumeName"); // bind to a fresh volume on the target
+            }
+            if let Some(Value::Object(ann)) = obj.pointer_mut("/metadata/annotations") {
+                for a in PVC_BINDING_ANNOTATIONS {
+                    ann.remove(*a);
+                }
+            }
+        }
+        "ServiceAccount" => {
+            if let Some(o) = obj.as_object_mut() {
+                o.remove("secrets"); // auto-generated token references
+            }
+        }
+        _ => {}
+    }
+}
+
 /// What `kubectl neat` would leave: something you can apply anywhere.
-/// Drops status and every server-assigned identity field.
+/// Drops status, every server-assigned identity field, and per-kind
+/// cluster-assigned values (Service cluster IPs, PVC volume bindings…).
 pub fn clean_for_export(obj: &mut Value) {
+    strip_cluster_assigned(obj);
     if let Some(o) = obj.as_object_mut() {
         o.remove("status");
         if let Some(meta) = o.get_mut("metadata") {
@@ -143,6 +199,141 @@ pub fn references(obj: &Value) -> Vec<ObjectRef> {
         }
     }
     out.into_iter().collect()
+}
+
+/// An object that belongs with a workload when exporting or copying it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedRef {
+    pub kind: String,
+    pub name: String,
+    /// Why it's related, e.g. "selects its pods", "routes to Service web".
+    pub reason: String,
+    /// Exists in the workload's namespace (references can dangle).
+    pub exists: bool,
+    /// Holds credentials; never included unless asked for.
+    pub sensitive: bool,
+    /// Pre-ticked in the export/copy dialogs.
+    pub default_selected: bool,
+}
+
+fn labels_at(v: &Value, pointer: &str) -> serde_json::Map<String, Value> {
+    v.pointer(pointer).and_then(Value::as_object).cloned().unwrap_or_default()
+}
+
+/// Kubernetes equality-based selector: every selector label must match. An
+/// empty selector matches nothing here (Services without selectors are
+/// managed by hand).
+pub fn selector_matches(selector: &serde_json::Map<String, Value>, labels: &serde_json::Map<String, Value>) -> bool {
+    !selector.is_empty() && selector.iter().all(|(k, v)| labels.get(k) == Some(v))
+}
+
+/// Labels the workload's pods get.
+fn pod_template_labels(workload: &Value) -> serde_json::Map<String, Value> {
+    for p in ["/spec/template/metadata/labels", "/spec/jobTemplate/spec/template/metadata/labels", "/metadata/labels"] {
+        let l = labels_at(workload, p);
+        if !l.is_empty() {
+            return l;
+        }
+    }
+    Default::default()
+}
+
+/// Everything that belongs with a workload: pod-spec references (ConfigMaps,
+/// Secrets, ServiceAccount, PVCs), Services selecting its pods, Ingresses
+/// routing to those Services, and HPAs scaling it. `services`, `ingresses`
+/// and `hpas` are the objects in the workload's namespace; `exists` answers
+/// for pod-spec references.
+pub fn related_objects(
+    workload: &Value,
+    services: &[Value],
+    ingresses: &[Value],
+    hpas: &[Value],
+    exists: impl Fn(&str, &str) -> bool,
+) -> Vec<RelatedRef> {
+    let mut out = Vec::new();
+    for ObjectRef { kind, name } in references(workload) {
+        let (reason, sensitive, default_selected) = match kind.as_str() {
+            "Secret" => ("used by its pods (contains credentials)", true, false),
+            "PersistentVolumeClaim" => ("mounted by its pods; data isn't included, only the claim", false, false),
+            "ServiceAccount" => ("its pods run as this account", false, true),
+            _ => ("used by its pods", false, true),
+        };
+        out.push(RelatedRef { exists: exists(&kind, &name), kind, name, reason: reason.into(), sensitive, default_selected });
+    }
+
+    let labels = pod_template_labels(workload);
+    let mut service_names = Vec::new();
+    for svc in services {
+        let selector = labels_at(svc, "/spec/selector");
+        if selector_matches(&selector, &labels) {
+            if let Some(n) = svc.pointer("/metadata/name").and_then(Value::as_str) {
+                service_names.push(n.to_string());
+                out.push(RelatedRef {
+                    kind: "Service".into(),
+                    name: n.into(),
+                    reason: "selects its pods".into(),
+                    exists: true,
+                    sensitive: false,
+                    default_selected: true,
+                });
+            }
+        }
+    }
+
+    for ing in ingresses {
+        let backends = ingress_backend_services(ing);
+        if let Some(hit) = backends.iter().find(|b| service_names.contains(b)) {
+            if let Some(n) = ing.pointer("/metadata/name").and_then(Value::as_str) {
+                out.push(RelatedRef {
+                    kind: "Ingress".into(),
+                    name: n.into(),
+                    reason: format!("routes to Service {hit}"),
+                    exists: true,
+                    sensitive: false,
+                    default_selected: true,
+                });
+            }
+        }
+    }
+
+    let (wk, wn) = (
+        workload.get("kind").and_then(Value::as_str).unwrap_or_default(),
+        workload.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default(),
+    );
+    for hpa in hpas {
+        let target_kind = hpa.pointer("/spec/scaleTargetRef/kind").and_then(Value::as_str);
+        let target_name = hpa.pointer("/spec/scaleTargetRef/name").and_then(Value::as_str);
+        if target_kind == Some(wk) && target_name == Some(wn) {
+            if let Some(n) = hpa.pointer("/metadata/name").and_then(Value::as_str) {
+                out.push(RelatedRef {
+                    kind: "HorizontalPodAutoscaler".into(),
+                    name: n.into(),
+                    reason: "scales it".into(),
+                    exists: true,
+                    sensitive: false,
+                    default_selected: true,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Service names an Ingress sends traffic to (rules and default backend).
+pub fn ingress_backend_services(ingress: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(n) = ingress.pointer("/spec/defaultBackend/service/name").and_then(Value::as_str) {
+        out.push(n.to_string());
+    }
+    for rule in ingress.pointer("/spec/rules").and_then(Value::as_array).into_iter().flatten() {
+        for path in rule.pointer("/http/paths").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(n) = path.pointer("/backend/service/name").and_then(Value::as_str) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// A file (or pasted text) handed to import.
@@ -363,5 +554,65 @@ mod tests {
         let mut kinds = vec!["Deployment", "Ingress", "ConfigMap", "Namespace", "Service", "ServiceAccount"];
         kinds.sort_by_key(|k| apply_order(k));
         assert_eq!(kinds, vec!["Namespace", "ServiceAccount", "ConfigMap", "Service", "Deployment", "Ingress"]);
+    }
+
+    #[test]
+    fn export_strips_per_kind_cluster_values() {
+        let mut svc = json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": { "name": "web" },
+            "spec": { "type": "LoadBalancer", "clusterIP": "10.43.0.9", "clusterIPs": ["10.43.0.9"],
+                      "ports": [{ "port": 80, "nodePort": 31234 }], "selector": { "app": "web" } }
+        });
+        clean_for_export(&mut svc);
+        assert!(svc["spec"].get("clusterIP").is_none() && svc["spec"].get("clusterIPs").is_none());
+        assert!(svc["spec"]["ports"][0].get("nodePort").is_none(), "auto-assigned node port dropped");
+
+        let mut np = json!({ "apiVersion": "v1", "kind": "Service", "metadata": { "name": "np" },
+                             "spec": { "type": "NodePort", "ports": [{ "port": 80, "nodePort": 30080 }] } });
+        clean_for_export(&mut np);
+        assert_eq!(np["spec"]["ports"][0]["nodePort"], 30080, "NodePort services keep their pinned port");
+
+        let mut pvc = json!({
+            "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": { "name": "data", "annotations": { "pv.kubernetes.io/bind-completed": "yes", "team": "x" } },
+            "spec": { "volumeName": "pvc-123", "resources": { "requests": { "storage": "1Gi" } } }
+        });
+        clean_for_export(&mut pvc);
+        assert!(pvc["spec"].get("volumeName").is_none());
+        assert_eq!(pvc["metadata"]["annotations"], json!({ "team": "x" }));
+    }
+
+    #[test]
+    fn finds_related_services_ingresses_and_hpas() {
+        let services = vec![
+            json!({ "metadata": { "name": "web" }, "spec": { "selector": { "app": "web" } } }),
+            json!({ "metadata": { "name": "other" }, "spec": { "selector": { "app": "other" } } }),
+            json!({ "metadata": { "name": "manual" }, "spec": {} }),
+        ];
+        let ingresses = vec![
+            json!({ "metadata": { "name": "web-ing" }, "spec": { "rules": [{ "http": { "paths": [{ "backend": { "service": { "name": "web" } } }] } }] } }),
+            json!({ "metadata": { "name": "other-ing" }, "spec": { "defaultBackend": { "service": { "name": "other" } } } }),
+        ];
+        let hpas = vec![
+            json!({ "metadata": { "name": "web-hpa" }, "spec": { "scaleTargetRef": { "kind": "Deployment", "name": "web" } } }),
+            json!({ "metadata": { "name": "x-hpa" }, "spec": { "scaleTargetRef": { "kind": "Deployment", "name": "x" } } }),
+        ];
+        let rel = related_objects(&deployment(), &services, &ingresses, &hpas, |kind, _| kind != "PersistentVolumeClaim");
+        let summary: Vec<String> = rel.iter().map(|r| format!("{}/{}:{}:{}", r.kind, r.name, r.default_selected, r.exists)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                "ConfigMap/web-config:true:true",
+                "PersistentVolumeClaim/web-data:false:false",
+                "Secret/ghcr:false:true",
+                "Secret/web-secrets:false:true",
+                "ServiceAccount/web-sa:true:true",
+                "Service/web:true:true",
+                "Ingress/web-ing:true:true",
+                "HorizontalPodAutoscaler/web-hpa:true:true",
+            ]
+        );
+        assert!(rel.iter().filter(|r| r.kind == "Secret").all(|r| r.sensitive));
     }
 }

@@ -3,6 +3,8 @@
 //! store. The Tauri layer spawns [`Monitor::run_poll_loop`] and
 //! [`Monitor::run_log_loop`] and forwards [`EventSink`] callbacks to the UI.
 
+pub mod forwards;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -33,6 +35,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn notify(&self, title: &str, body: &str);
     /// Update the tray icon's tooltip with a one-glance status.
     fn tray_status(&self, tooltip: &str);
+    /// The set of port-forwards (or their counters) changed.
+    fn forwards_changed(&self, forwards: &[forwards::ForwardInfo]);
 }
 
 /// Failed polls of the active cluster before "can't reach" fires (≈45 s at
@@ -91,6 +95,9 @@ pub struct Monitor {
     outages: std::sync::Mutex<HashMap<String, Outage>>,
     /// Tray tooltip state, per profile id.
     tray: std::sync::Mutex<HashMap<String, TrayLine>>,
+    /// Active Service port-forwards by id.
+    forwards: std::sync::Mutex<HashMap<u64, forwards::ForwardEntry>>,
+    next_forward: std::sync::atomic::AtomicU64,
 }
 
 fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = T> {
@@ -120,6 +127,8 @@ impl Monitor {
             alerted: Default::default(),
             outages: Default::default(),
             tray: Default::default(),
+            forwards: Default::default(),
+            next_forward: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -775,6 +784,7 @@ mod tests {
         fn tray_status(&self, tooltip: &str) {
             *self.tooltip.lock().unwrap() = tooltip.to_string();
         }
+        fn forwards_changed(&self, _: &[forwards::ForwardInfo]) {}
     }
 
     fn monitor() -> (Arc<Monitor>, Arc<FakeSink>) {

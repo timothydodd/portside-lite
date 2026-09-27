@@ -336,20 +336,64 @@ pub async fn save_text_file(path: String, contents: String) -> CmdResult<()> {
     tokio::fs::write(&path, contents).await.map_err(|e| format!("Couldn't write {path}: {e}"))
 }
 
+/// Objects that belong with a workload (for the export and copy dialogs).
 #[tauri::command]
-pub async fn workload_references(
+pub async fn related_objects(
     state: State<'_, AppState>,
     kind: String,
     namespace: String,
     name: String,
-) -> CmdResult<Vec<portside_kube::manifests::RefStatus>> {
+) -> CmdResult<Vec<portside_core::manifest::RelatedRef>> {
     let cc = state.monitor.client().await?;
-    portside_kube::manifests::workload_references(&cc.client, &kind, &namespace, &name)
+    portside_kube::manifests::related(&cc.client, &kind, &namespace, &name).await.map_err(err)
+}
+
+/// A workload plus chosen related objects as one multi-document YAML.
+#[tauri::command]
+pub async fn export_bundle(
+    state: State<'_, AppState>,
+    kind: String,
+    namespace: String,
+    name: String,
+    extras: Vec<portside_core::manifest::ObjectRef>,
+) -> CmdResult<String> {
+    let cc = state.monitor.client().await?;
+    portside_kube::manifests::export_bundle(&cc.client, &kind, &namespace, &name, &extras)
         .await
         .map_err(err)
 }
 
-/// Copy a workload (plus chosen ConfigMaps/Secrets) from the active cluster
+#[tauri::command]
+pub async fn get_config(
+    state: State<'_, AppState>,
+    kind: String,
+    namespace: String,
+    name: String,
+) -> CmdResult<portside_kube::config::ConfigData> {
+    let cc = state.monitor.client().await?;
+    portside_kube::config::get_config(&cc.client, &kind, &namespace, &name).await.map_err(err)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn save_config(
+    state: State<'_, AppState>,
+    kind: String,
+    namespace: String,
+    name: String,
+    resource_version: String,
+    text: std::collections::BTreeMap<String, String>,
+    keep_binary: Vec<String>,
+) -> CmdResult<portside_kube::config::ConfigData> {
+    let cc = state.monitor.client().await?;
+    let saved = portside_kube::config::save_config(&cc.client, &kind, &namespace, &name, &resource_version, text, &keep_binary)
+        .await
+        .map_err(err)?;
+    state.monitor.refresh_now();
+    Ok(saved)
+}
+
+/// Copy a workload (plus chosen related objects) from the active cluster
 /// to any saved connection, into `target_namespace`.
 #[tauri::command]
 pub async fn copy_to_cluster(
@@ -482,4 +526,29 @@ pub async fn import_manifests(
         state.monitor.refresh_now();
     }
     Ok(results)
+}
+
+// --- port-forwarding -----------------------------------------------------------
+
+/// Forward a Service port in the active cluster to 127.0.0.1. `local_port`
+/// null picks a free, memorable port.
+#[tauri::command]
+pub async fn start_port_forward(
+    state: State<'_, AppState>,
+    namespace: String,
+    service: String,
+    service_port: i32,
+    local_port: Option<u16>,
+) -> CmdResult<portside_monitor::forwards::ForwardInfo> {
+    state.monitor.start_forward(&namespace, &service, service_port, local_port).await
+}
+
+#[tauri::command]
+pub fn stop_port_forward(state: State<'_, AppState>, id: u64) {
+    state.monitor.stop_forward(id);
+}
+
+#[tauri::command]
+pub fn list_port_forwards(state: State<'_, AppState>) -> Vec<portside_monitor::forwards::ForwardInfo> {
+    state.monitor.list_forwards()
 }

@@ -11,6 +11,7 @@ export default function StatusBar() {
   // The saved setting is the source of truth; the status event may lag it.
   const paused = useClusterStore((s) => s.settings?.monitoringPaused) || status?.paused;
   const go = useNavStore((s) => s.go);
+  const forwardCount = useClusterStore((s) => s.forwards.length);
   const [, tick] = useState(0);
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 5000);
@@ -42,6 +43,11 @@ export default function StatusBar() {
       </button>
       {status?.serverVersion && <span>k8s {status.serverVersion}</span>}
       {status?.message && <span className="truncate text-warning">{status.message}</span>}
+      {forwardCount > 0 && (
+        <button className="flex items-center gap-1 text-accent hover:underline" onClick={() => go("services")} title="Active port forwards">
+          ⇄ {forwardCount} forward{forwardCount === 1 ? "" : "s"}
+        </button>
+      )}
       <span className="ml-auto">
         Polled {fmtAgo(status?.lastPollMs)}
         {status?.lastPollDurationMs != null && ` (${status.lastPollDurationMs} ms)`}

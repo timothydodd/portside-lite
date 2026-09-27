@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
-use k8s_openapi::api::core::v1::{Event, Node, PersistentVolumeClaim, Pod};
+use k8s_openapi::api::core::v1::{ConfigMap, Event, Node, PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::networking::v1::Ingress;
 use kube::api::{Api, ListParams, ObjectList};
 use kube::Client;
 use portside_core::quantity::{parse_cpu, parse_memory};
@@ -40,6 +41,15 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         list::<PersistentVolumeClaim>(client, &all),
         list::<Event>(client, &warnings),
     )?;
+    // Optional kinds: a restricted kubeconfig may not be allowed to list
+    // Secrets, and not every cluster serves Ingress. Empty rather than failing
+    // the whole poll.
+    let (services, configmaps, secrets, ingresses) = futures::join!(
+        list_or_empty::<Service>(client, &all),
+        list_or_empty::<ConfigMap>(client, &all),
+        list_or_empty::<Secret>(client, &all),
+        list_or_empty::<Ingress>(client, &all),
+    );
     Ok(ClusterObjects {
         server_version: version,
         nodes,
@@ -51,7 +61,22 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         cronjobs,
         pvcs,
         events,
+        services,
+        configmaps,
+        secrets,
+        ingresses,
     })
+}
+
+async fn list_or_empty<K>(client: &Client, lp: &ListParams) -> Vec<K>
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    list::<K>(client, lp).await.unwrap_or_default()
 }
 
 #[derive(Deserialize)]

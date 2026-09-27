@@ -501,6 +501,46 @@ fn detect_workloads(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
     }
 }
 
+/// Services whose selector matches no running pod, or none that is Ready:
+/// traffic to them fails even though the Service itself looks fine.
+fn detect_services(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for s in &snap.services {
+        if s.type_ == "ExternalName" || s.selector.is_empty() {
+            continue;
+        }
+        let (rule, detail, hint) = if s.pods_matched == 0 {
+            (
+                "service-no-pods",
+                "Its selector matches no running pod, so requests have nowhere to go.".to_string(),
+                "Compare the Service's selector with the pod labels. A typo, or the workload is scaled to 0.",
+            )
+        } else if s.pods_ready == 0 {
+            (
+                "service-no-ready-endpoints",
+                format!("Selects {} pod(s) but none are Ready, so it has no endpoints.", s.pods_matched),
+                "Fix the backing pods first (readiness probe, crash); see their problems.",
+            )
+        } else {
+            continue;
+        };
+        out.push(Issue {
+            key: format!("{rule}:Service/{}/{}", s.namespace, s.name),
+            severity: Severity::Warning,
+            category: "network".into(),
+            rule: rule.into(),
+            kind: "Service".into(),
+            namespace: Some(s.namespace.clone()),
+            name: s.name.clone(),
+            title: format!("No endpoints: Service {}", s.name),
+            detail,
+            hint: Some(hint.into()),
+            since_ms: None,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+}
+
 fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     // Group by (object, reason) so a flapping probe is one issue, not fifty.
     let mut groups: HashMap<(String, String, String, String), (i32, &EventInfo)> = HashMap::new();
@@ -555,6 +595,7 @@ pub fn detect(snap: &ClusterSnapshot, settings: &Settings, now_ms: i64) -> Vec<I
     detect_nodes(snap, settings, &mut out);
     detect_pods(snap, settings, now_ms, &mut out);
     detect_workloads(snap, &mut out);
+    detect_services(snap, &mut out);
     detect_events(snap, now_ms, &mut out);
     sort_dedupe(&mut out);
     out
@@ -713,5 +754,24 @@ mod tests {
         let issues = detect(&snap, &Settings::default(), NOW);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].detail.contains("7×"));
+    }
+
+    #[test]
+    fn service_without_endpoints() {
+        let svc = |name: &str, matched, ready| ServiceInfo {
+            namespace: "apps".into(),
+            name: name.into(),
+            type_: "ClusterIP".into(),
+            selector: [("app".to_string(), name.to_string())].into(),
+            pods_matched: matched,
+            pods_ready: ready,
+            ..Default::default()
+        };
+        let snap = ClusterSnapshot {
+            services: vec![svc("none", 0, 0), svc("unready", 2, 0), svc("fine", 2, 1)],
+            ..Default::default()
+        };
+        let rules: Vec<String> = detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.rule).collect();
+        assert_eq!(rules, vec!["service-no-pods", "service-no-ready-endpoints"]);
     }
 }

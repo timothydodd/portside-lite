@@ -9,6 +9,11 @@ import NodeDrawer from "./components/NodeDrawer";
 import ManifestEditor from "./components/ManifestEditor";
 import CopyDialog from "./components/CopyDialog";
 import ImportDialog from "./components/ImportDialog";
+import ExportDialog from "./components/ExportDialog";
+import ConfigEditor from "./components/ConfigEditor";
+import { ForwardDialog } from "./components/Forwards";
+import ServicesPage from "./pages/ServicesPage";
+import ConfigPage from "./pages/ConfigPage";
 import OverviewPage from "./pages/OverviewPage";
 import ProblemsPage from "./pages/ProblemsPage";
 import PodsPage from "./pages/PodsPage";
@@ -41,7 +46,7 @@ function PausedBanner() {
 export default function App() {
   const init = useClusterStore((s) => s.init);
   const settings = useClusterStore((s) => s.settings);
-  const { page, go, pod, node, editor, copy, closePod, closeNode, closeEditor, closeCopy } = useNavStore();
+  const { page, go, pod, node, editor, copy, exporting, config, closePod, closeNode, closeEditor, closeCopy, closeExport, closeConfig } = useNavStore();
 
   useEffect(() => {
     void init();
@@ -64,6 +69,8 @@ export default function App() {
             {page === "problems" && <ProblemsPage />}
             {page === "pods" && <PodsPage />}
             {page === "workloads" && <WorkloadsPage />}
+            {page === "services" && <ServicesPage />}
+            {page === "config" && <ConfigPage />}
             {page === "nodes" && <NodesPage />}
             {page === "events" && <EventsPage />}
             {page === "logs" && <LogsPage />}
@@ -88,11 +95,24 @@ export default function App() {
           <ManifestEditor />
         </ErrorBoundary>
       )}
+      {config && (
+        <ErrorBoundary resetKey={`${config.kind}/${config.namespace}/${config.name}`} onReset={closeConfig} className="fixed inset-y-0 right-0 z-40 w-[min(920px,92vw)] border-l border-border bg-surface shadow-[var(--shadow-md)]">
+          <ConfigEditor />
+        </ErrorBoundary>
+      )}
+      {exporting && (
+        <ErrorBoundary resetKey={`${exporting.kind}/${exporting.namespace}/${exporting.name}`} onReset={closeExport} className="fixed left-1/2 top-1/2 z-50 w-[min(640px,94vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface shadow-[var(--shadow-md)]">
+          <ExportDialog />
+        </ErrorBoundary>
+      )}
       {copy && (
         <ErrorBoundary resetKey={`${copy.kind}/${copy.namespace}/${copy.name}`} onReset={closeCopy} className="fixed left-1/2 top-1/2 z-50 w-[min(640px,94vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface shadow-[var(--shadow-md)]">
           <CopyDialog />
         </ErrorBoundary>
       )}
+      <ErrorBoundary resetKey="forward">
+        <ForwardDialog />
+      </ErrorBoundary>
       <ScaleDialog />
       <DeleteDialog />
       <ErrorBoundary resetKey="import">

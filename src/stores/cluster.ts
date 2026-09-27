@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "../lib/ipc";
-import type { ClusterSnapshot, ConnectionProfile, Settings, Status } from "../lib/types";
+import type { ClusterSnapshot, ConnectionProfile, ForwardInfo, Settings, Status } from "../lib/types";
 
 interface ClusterState {
   snapshot: ClusterSnapshot | null;
@@ -9,6 +9,8 @@ interface ClusterState {
   settings: Settings | null;
   /** Bumps whenever a log sync lands, so log views can re-query. */
   logSyncTick: number;
+  /** Active Service port-forwards (live, via `forwards:changed`). */
+  forwards: ForwardInfo[];
   init: () => Promise<void>;
   saveSettings: (s: Settings) => Promise<void>;
   /** Make another saved connection the monitored one. */
@@ -32,6 +34,7 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
   status: null,
   settings: null,
   logSyncTick: 0,
+  forwards: [],
 
   init: async () => {
     if (initialized) return;
@@ -41,9 +44,15 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
       listen<Status>("cluster:status", (e) => set({ status: e.payload })),
       listen<Settings>("settings:changed", (e) => set({ settings: e.payload })),
       listen<number>("logs:synced", () => set((s) => ({ logSyncTick: s.logSyncTick + 1 }))),
+      listen<ForwardInfo[]>("forwards:changed", (e) => set({ forwards: e.payload })),
     ]);
-    const [snapshot, status, settings] = await Promise.all([ipc.getSnapshot(), ipc.getStatus(), ipc.getSettings()]);
-    set({ snapshot, status, settings });
+    const [snapshot, status, settings, forwards] = await Promise.all([
+      ipc.getSnapshot(),
+      ipc.getStatus(),
+      ipc.getSettings(),
+      ipc.listPortForwards(),
+    ]);
+    set({ snapshot, status, settings, forwards });
   },
 
   saveSettings: async (s) => {

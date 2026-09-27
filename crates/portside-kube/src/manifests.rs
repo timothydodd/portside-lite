@@ -6,7 +6,8 @@ use kube::core::{GroupVersionKind, TypeMeta};
 use kube::discovery::{self, ApiCapabilities, ApiResource, Scope};
 use kube::Client;
 use portside_core::manifest::{
-    apply_order, clean_for_edit, clean_for_export, references, retarget_namespace, ManifestDoc, ObjectRef,
+    apply_order, clean_for_edit, clean_for_export, references, related_objects, retarget_namespace, ManifestDoc,
+    ObjectRef, RelatedRef,
 };
 use std::collections::HashMap;
 use serde::Serialize;
@@ -26,6 +27,7 @@ fn group_version(kind: &str) -> (&'static str, &'static str) {
         "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" => ("apps", "v1"),
         "Job" | "CronJob" => ("batch", "v1"),
         "Ingress" => ("networking.k8s.io", "v1"),
+        "HorizontalPodAutoscaler" => ("autoscaling", "v2"),
         _ => ("", "v1"), // Pod, Service, ConfigMap, Secret, PVC, ServiceAccount, Namespace, Node
     }
 }
@@ -144,29 +146,49 @@ pub async fn apply_edit(
     ))
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefStatus {
-    pub kind: String,
-    pub name: String,
-    /// Whether it exists in the source namespace.
-    pub exists: bool,
-    /// ConfigMap/Secret can be copied along; PVC/ServiceAccount are warnings.
-    pub copyable: bool,
+/// Every object in the namespace as JSON, or empty if the kind isn't served
+/// or listing is forbidden.
+async fn list_values(client: &Client, kind: &str, namespace: &str) -> Vec<Value> {
+    let Ok((api, ar)) = api_for_kind(client, kind, Some(namespace)).await else { return Vec::new() };
+    let Ok(list) = api.list(&ListParams::default()).await else { return Vec::new() };
+    list.items.into_iter().filter_map(|o| to_value(o, &ar).ok()).collect()
 }
 
-/// What a workload depends on, and whether each exists in its namespace.
-pub async fn workload_references(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<Vec<RefStatus>> {
-    let v = get_value(client, kind, Some(namespace), name).await?;
-    let mut out = Vec::new();
-    for ObjectRef { kind: rk, name: rn } in references(&v) {
-        let exists = match api_for_kind(client, &rk, Some(namespace)).await {
-            Ok((api, _)) => api.get_opt(&rn).await.ok().flatten().is_some(),
-            Err(_) => false,
-        };
-        out.push(RefStatus { copyable: rk == "ConfigMap" || rk == "Secret", kind: rk, name: rn, exists });
+/// What belongs with a workload when exporting or copying it: pod-spec
+/// references, Services selecting its pods, Ingresses routing to them, HPAs.
+pub async fn related(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<Vec<RelatedRef>> {
+    let workload = get_value(client, kind, Some(namespace), name).await?;
+    let (services, ingresses, hpas) = futures::join!(
+        list_values(client, "Service", namespace),
+        list_values(client, "Ingress", namespace),
+        list_values(client, "HorizontalPodAutoscaler", namespace),
+    );
+    let mut present = std::collections::HashSet::new();
+    for r in references(&workload) {
+        if let Ok((api, _)) = api_for_kind(client, &r.kind, Some(namespace)).await {
+            if api.get_opt(&r.name).await.ok().flatten().is_some() {
+                present.insert((r.kind, r.name));
+            }
+        }
     }
-    Ok(out)
+    Ok(related_objects(&workload, &services, &ingresses, &hpas, |k, n| {
+        present.contains(&(k.to_string(), n.to_string()))
+    }))
+}
+
+/// One workload plus the chosen related objects as a single multi-document
+/// YAML file in apply order (dependencies first), cleaned for re-use anywhere.
+pub async fn export_bundle(client: &Client, kind: &str, namespace: &str, name: &str, extras: &[ObjectRef]) -> Result<String> {
+    let mut items: Vec<ObjectRef> = extras.to_vec();
+    items.push(ObjectRef { kind: kind.into(), name: name.into() });
+    items.sort_by_key(|r| apply_order(&r.kind));
+    let mut docs = Vec::with_capacity(items.len());
+    for r in &items {
+        let mut v = get_value(client, &r.kind, Some(namespace), &r.name).await?;
+        clean_for_export(&mut v);
+        docs.push(to_yaml(&v)?);
+    }
+    Ok(docs.join("---\n"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,8 +217,10 @@ pub async fn copy_objects(
     let mut pp = PatchParams::apply(FIELD_MANAGER).force();
     pp.dry_run = dry_run;
 
+    let mut ordered: Vec<&ObjectRef> = items.iter().collect();
+    ordered.sort_by_key(|r| apply_order(&r.kind));
     let mut results = Vec::with_capacity(items.len());
-    for item in items {
+    for item in ordered {
         if !ns_ready {
             // Dry run into a namespace that doesn't exist yet: the server can't
             // validate objects inside it, so report the plan instead of failing.

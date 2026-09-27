@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ContainerStatus, Event, Node, PersistentVolumeClaim, Pod, PodSpec,
+    ConfigMap, ContainerStatus, Event, Node, PersistentVolumeClaim, Pod, PodSpec, Secret, Service,
 };
+use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
 
@@ -27,6 +28,10 @@ pub struct ClusterObjects {
     pub pvcs: Vec<PersistentVolumeClaim>,
     /// Warning events only.
     pub events: Vec<Event>,
+    pub services: Vec<Service>,
+    pub configmaps: Vec<ConfigMap>,
+    pub secrets: Vec<Secret>,
+    pub ingresses: Vec<Ingress>,
 }
 
 /// Live usage from metrics.k8s.io, in cores and bytes.
@@ -84,6 +89,8 @@ pub fn build_snapshot(
     workloads.extend(objs.cronjobs.iter().map(cronjob_info));
 
     let volumes: Vec<VolumeClaimInfo> = objs.pvcs.iter().map(pvc_info).collect();
+    let services = services_info(objs);
+    let configs = configs_info(objs);
 
     let mut events: Vec<EventInfo> = objs.events.iter().map(event_info).collect();
     events.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
@@ -126,6 +133,8 @@ pub fn build_snapshot(
         pods,
         workloads,
         volumes,
+        services,
+        configs,
         events,
         issues: Vec::new(),
         namespaces: namespaces.into_iter().collect(),
@@ -565,6 +574,171 @@ fn pvc_info(p: &PersistentVolumeClaim) -> VolumeClaimInfo {
     }
 }
 
+fn pod_is_ready(p: &Pod) -> bool {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
+}
+
+/// Services with live endpoint health computed from pod labels + readiness,
+/// and the Ingress rules that route to each.
+fn services_info(objs: &ClusterObjects) -> Vec<ServiceInfo> {
+    // Ingress routes per (namespace, service).
+    let mut routes: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for ing in &objs.ingresses {
+        let ns = ns_of(&ing.metadata);
+        let ing_name = name_of(&ing.metadata);
+        let Some(spec) = &ing.spec else { continue };
+        if let Some(svc) = spec.default_backend.as_ref().and_then(|b| b.service.as_ref()) {
+            routes.entry((ns.clone(), svc.name.clone())).or_default().push(format!("* (default, {ing_name})"));
+        }
+        for rule in spec.rules.iter().flatten() {
+            let host = rule.host.clone().unwrap_or_else(|| "*".into());
+            for path in rule.http.iter().flat_map(|h| h.paths.iter()) {
+                if let Some(svc) = &path.backend.service {
+                    let p = path.path.clone().unwrap_or_else(|| "/".into());
+                    routes.entry((ns.clone(), svc.name.clone())).or_default().push(format!("{host}{p} ({ing_name})"));
+                }
+            }
+        }
+    }
+
+    objs.services
+        .iter()
+        .map(|s| {
+            let spec = s.spec.clone().unwrap_or_default();
+            let ns = ns_of(&s.metadata);
+            let name = name_of(&s.metadata);
+            let selector: BTreeMap<String, String> = spec.selector.clone().unwrap_or_default();
+            let matched: Vec<&Pod> = if selector.is_empty() {
+                Vec::new()
+            } else {
+                objs.pods
+                    .iter()
+                    .filter(|p| p.metadata.namespace.as_deref() == Some(ns.as_str()))
+                    .filter(|p| p.metadata.deletion_timestamp.is_none())
+                    .filter(|p| p.status.as_ref().and_then(|st| st.phase.as_deref()) == Some("Running"))
+                    .filter(|p| {
+                        let labels = p.metadata.labels.as_ref();
+                        selector.iter().all(|(k, v)| labels.and_then(|l| l.get(k)) == Some(v))
+                    })
+                    .collect()
+            };
+            let mut external: Vec<String> = s
+                .status
+                .as_ref()
+                .and_then(|st| st.load_balancer.as_ref())
+                .and_then(|lb| lb.ingress.as_ref())
+                .map(|ing| ing.iter().filter_map(|i| i.ip.clone().or_else(|| i.hostname.clone())).collect())
+                .unwrap_or_default();
+            external.extend(spec.external_ips.clone().unwrap_or_default());
+            if let Some(en) = &spec.external_name {
+                external.push(en.clone());
+            }
+            ServiceInfo {
+                type_: spec.type_.clone().unwrap_or_else(|| "ClusterIP".into()),
+                cluster_ip: spec.cluster_ip.clone().filter(|ip| ip != "None" && !ip.is_empty()),
+                external,
+                ports: spec
+                    .ports
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| ServicePort {
+                        name: p.name,
+                        port: p.port,
+                        target_port: p.target_port.map(|t| match t {
+                            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(i) => i.to_string(),
+                            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(s) => s,
+                        }),
+                        node_port: p.node_port,
+                        protocol: p.protocol.unwrap_or_else(|| "TCP".into()),
+                    })
+                    .collect(),
+                pods_ready: matched.iter().filter(|p| pod_is_ready(p)).count(),
+                pods_matched: matched.len(),
+                pod_names: matched.iter().map(|p| name_of(&p.metadata)).collect(),
+                routes: routes.remove(&(ns.clone(), name.clone())).unwrap_or_default(),
+                created_ms: ms(&s.metadata.creation_timestamp),
+                selector,
+                namespace: ns,
+                name,
+            }
+        })
+        .collect()
+}
+
+/// ConfigMaps and Secrets (key names and sizes only) with the workloads that
+/// reference each.
+fn configs_info(objs: &ClusterObjects) -> Vec<ConfigInfo> {
+    // (namespace, kind, name) → ["Deployment/web", …]
+    let mut used: HashMap<(String, String, String), Vec<String>> = HashMap::new();
+    let mut note = |kind: &str, meta: &ObjectMeta, value: serde_json::Result<serde_json::Value>| {
+        let Ok(v) = value else { return };
+        let ns = ns_of(meta);
+        let who = format!("{kind}/{}", name_of(meta));
+        for r in crate::manifest::references(&v) {
+            if r.kind == "ConfigMap" || r.kind == "Secret" {
+                used.entry((ns.clone(), r.kind, r.name)).or_default().push(who.clone());
+            }
+        }
+    };
+    for d in &objs.deployments {
+        note("Deployment", &d.metadata, serde_json::to_value(d));
+    }
+    for s in &objs.statefulsets {
+        note("StatefulSet", &s.metadata, serde_json::to_value(s));
+    }
+    for d in &objs.daemonsets {
+        note("DaemonSet", &d.metadata, serde_json::to_value(d));
+    }
+    for c in &objs.cronjobs {
+        note("CronJob", &c.metadata, serde_json::to_value(c));
+    }
+
+    let mut out = Vec::new();
+    for c in &objs.configmaps {
+        let mut keys: Vec<String> = c.data.iter().flat_map(|d| d.keys().cloned()).collect();
+        keys.extend(c.binary_data.iter().flat_map(|d| d.keys().cloned()));
+        keys.sort();
+        let size = c.data.iter().flat_map(|d| d.values()).map(String::len).sum::<usize>()
+            + c.binary_data.iter().flat_map(|d| d.values()).map(|b| b.0.len()).sum::<usize>();
+        let (ns, name) = (ns_of(&c.metadata), name_of(&c.metadata));
+        out.push(ConfigInfo {
+            kind: "ConfigMap".into(),
+            used_by: used.remove(&(ns.clone(), "ConfigMap".into(), name.clone())).unwrap_or_default(),
+            secret_type: None,
+            keys,
+            size_bytes: size,
+            immutable: c.immutable.unwrap_or(false),
+            created_ms: ms(&c.metadata.creation_timestamp),
+            namespace: ns,
+            name,
+        });
+    }
+    for s in &objs.secrets {
+        let mut keys: Vec<String> = s.data.iter().flat_map(|d| d.keys().cloned()).collect();
+        keys.extend(s.string_data.iter().flat_map(|d| d.keys().cloned()));
+        keys.sort();
+        keys.dedup();
+        let size = s.data.iter().flat_map(|d| d.values()).map(|b| b.0.len()).sum::<usize>();
+        let (ns, name) = (ns_of(&s.metadata), name_of(&s.metadata));
+        out.push(ConfigInfo {
+            kind: "Secret".into(),
+            used_by: used.remove(&(ns.clone(), "Secret".into(), name.clone())).unwrap_or_default(),
+            secret_type: s.type_.clone(),
+            keys,
+            size_bytes: size,
+            immutable: s.immutable.unwrap_or(false),
+            created_ms: ms(&s.metadata.creation_timestamp),
+            namespace: ns,
+            name,
+        });
+    }
+    out
+}
+
 fn event_info(e: &Event) -> EventInfo {
     let event_time = e.event_time.as_ref().map(|t| t.0.as_millisecond());
     let series_last = e
@@ -622,5 +796,39 @@ mod tests {
         assert_eq!(deployment_info(&deployment(2, Some("3"))).disabled_replicas, None, "manually scaled back up");
         assert_eq!(deployment_info(&deployment(0, None)).disabled_replicas, None, "plain scale-to-zero");
         assert_eq!(deployment_info(&deployment(0, Some("junk"))).disabled_replicas, None);
+    }
+
+    #[test]
+    fn service_endpoints_from_pod_labels_and_readiness() {
+        let pod = |name: &str, app: &str, ready: bool| -> Pod {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": name, "namespace": "apps", "labels": { "app": app } },
+                "spec": { "containers": [] },
+                "status": { "phase": "Running", "conditions": [{ "type": "Ready", "status": if ready { "True" } else { "False" } }] }
+            }))
+            .unwrap()
+        };
+        let svc: Service = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web", "namespace": "apps" },
+            "spec": { "selector": { "app": "web" }, "ports": [{ "port": 80, "targetPort": 8080 }] }
+        }))
+        .unwrap();
+        let ing: Ingress = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web-ing", "namespace": "apps" },
+            "spec": { "rules": [{ "host": "shop.lan", "http": { "paths": [{ "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }] } }] }
+        }))
+        .unwrap();
+        let objs = ClusterObjects {
+            pods: vec![pod("web-1", "web", true), pod("web-2", "web", false), pod("db-1", "db", true)],
+            services: vec![svc],
+            ingresses: vec![ing],
+            ..Default::default()
+        };
+        let snap = build_snapshot("c", &objs, &UsageMetrics::default(), 0);
+        let s = &snap.services[0];
+        assert_eq!((s.pods_matched, s.pods_ready), (2, 1));
+        assert_eq!(s.ports[0].target_port.as_deref(), Some("8080"));
+        assert_eq!(s.routes, vec!["shop.lan/ (web-ing)"]);
     }
 }

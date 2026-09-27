@@ -4,9 +4,11 @@
 //! session, so every read, write and log call behaves identically.
 
 pub mod actions;
+pub mod config;
 pub mod collect;
 pub mod logs;
 pub mod manifests;
+pub mod portforward;
 mod ssh;
 
 use kube::config::{KubeConfigOptions, Kubeconfig};

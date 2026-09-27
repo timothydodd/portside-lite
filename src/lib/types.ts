@@ -113,6 +113,41 @@ export interface VolumeClaimInfo {
   createdMs: number | null;
 }
 
+export interface ServicePort {
+  name: string | null;
+  port: number;
+  targetPort: string | null;
+  nodePort: number | null;
+  protocol: string;
+}
+
+export interface ServiceInfo {
+  namespace: string;
+  name: string;
+  type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" | string;
+  clusterIp: string | null;
+  external: string[];
+  ports: ServicePort[];
+  selector: Record<string, string>;
+  podsMatched: number;
+  podsReady: number;
+  podNames: string[];
+  routes: string[];
+  createdMs: number | null;
+}
+
+export interface ConfigInfo {
+  kind: "ConfigMap" | "Secret";
+  namespace: string;
+  name: string;
+  secretType: string | null;
+  keys: string[];
+  sizeBytes: number;
+  immutable: boolean;
+  usedBy: string[];
+  createdMs: number | null;
+}
+
 export interface EventInfo {
   namespace: string;
   objectKind: string;
@@ -129,7 +164,7 @@ export interface EventInfo {
 export interface Issue {
   key: string;
   severity: Severity;
-  category: "pod" | "node" | "workload" | "storage" | "event" | "logs";
+  category: "pod" | "node" | "workload" | "network" | "storage" | "event" | "logs";
   rule: string;
   kind: string;
   namespace: string | null;
@@ -167,6 +202,9 @@ export interface ClusterSnapshot {
   pods: PodInfo[];
   workloads: WorkloadInfo[];
   volumes: VolumeClaimInfo[];
+  services: ServiceInfo[];
+  /** ConfigMaps and Secrets: key names and sizes only. */
+  configs: ConfigInfo[];
   events: EventInfo[];
   issues: Issue[];
   namespaces: string[];
@@ -328,11 +366,32 @@ export interface ObjectRef {
   name: string;
 }
 
-export interface RefStatus extends ObjectRef {
-  /** Exists in the source namespace. */
+/** An object that belongs with a workload (export / copy). */
+export interface RelatedRef extends ObjectRef {
+  reason: string;
+  /** Exists in the workload's namespace. */
   exists: boolean;
-  /** ConfigMap/Secret can be copied along; others are warnings. */
-  copyable: boolean;
+  /** Holds credentials; never pre-selected. */
+  sensitive: boolean;
+  defaultSelected: boolean;
+}
+
+export interface ConfigEntry {
+  key: string;
+  /** Text value; null for binary entries (read-only). */
+  value: string | null;
+  binary: boolean;
+  size: number;
+}
+
+export interface ConfigData {
+  kind: "ConfigMap" | "Secret";
+  namespace: string;
+  name: string;
+  resourceVersion: string;
+  secretType: string | null;
+  immutable: boolean;
+  entries: ConfigEntry[];
 }
 
 export interface CopyResult extends ObjectRef {
@@ -372,4 +431,22 @@ export interface ImportResult {
   namespace: string | null;
   outcome: "created" | "updated" | "error";
   message: string | null;
+}
+
+// --- port-forwarding ---------------------------------------------------------
+
+export interface ForwardInfo {
+  id: number;
+  profileId: string;
+  clusterName: string;
+  namespace: string;
+  service: string;
+  servicePort: number;
+  localPort: number;
+  pod: string | null;
+  targetPort: number | null;
+  activeConnections: number;
+  totalConnections: number;
+  lastError: string | null;
+  startedMs: number;
 }

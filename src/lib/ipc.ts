@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ClusterSnapshot,
+  ConfigData,
   Connection,
   CopyResult,
   ErrorPattern,
+  ForwardInfo,
   EventInfo,
   HistogramBucket,
   ImportResult,
@@ -14,7 +16,7 @@ import type {
   ManifestDoc,
   ObjectRef,
   PodLogTotals,
-  RefStatus,
+  RelatedRef,
   Sample,
   Settings,
   SourceFile,
@@ -85,8 +87,20 @@ export const editManifest = (kind: string, namespace: string | null, name: strin
 export const applyManifest = (yaml: string, kind: string, namespace: string | null, name: string, dryRun: boolean) =>
   invoke<string>("apply_manifest", { yaml, kind, namespace, name, dryRun });
 export const saveTextFile = (path: string, contents: string) => invoke<void>("save_text_file", { path, contents });
-export const workloadReferences = (kind: string, namespace: string, name: string) =>
-  invoke<RefStatus[]>("workload_references", { kind, namespace, name });
+export const relatedObjects = (kind: string, namespace: string, name: string) =>
+  invoke<RelatedRef[]>("related_objects", { kind, namespace, name });
+export const exportBundle = (kind: string, namespace: string, name: string, extras: ObjectRef[]) =>
+  invoke<string>("export_bundle", { kind, namespace, name, extras });
+export const getConfig = (kind: string, namespace: string, name: string) =>
+  invoke<ConfigData>("get_config", { kind, namespace, name });
+export const saveConfig = (
+  kind: string,
+  namespace: string,
+  name: string,
+  resourceVersion: string,
+  text: Record<string, string>,
+  keepBinary: string[],
+) => invoke<ConfigData>("save_config", { kind, namespace, name, resourceVersion, text, keepBinary });
 export const copyToCluster = (
   kind: string,
   namespace: string,
@@ -119,3 +133,10 @@ export const importManifests = (
   namespaceOverride: string | null,
   dryRun: boolean,
 ) => invoke<ImportResult[]>("import_manifests", { sources, include, targetConnectionId, namespaceOverride, dryRun });
+
+// --- port-forwarding ---
+
+export const startPortForward = (namespace: string, service: string, servicePort: number, localPort: number | null) =>
+  invoke<ForwardInfo>("start_port_forward", { namespace, service, servicePort, localPort });
+export const stopPortForward = (id: number) => invoke<void>("stop_port_forward", { id });
+export const listPortForwards = () => invoke<ForwardInfo[]>("list_port_forwards");

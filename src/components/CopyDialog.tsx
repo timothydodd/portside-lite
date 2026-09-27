@@ -3,7 +3,7 @@ import { AlertTriangle, CheckCircle2, FlaskConical, ShieldAlert } from "lucide-r
 import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage } from "../lib/format";
-import type { CopyResult, ObjectRef, RefStatus } from "../lib/types";
+import type { CopyResult, ObjectRef, RelatedRef } from "../lib/types";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 import { toast } from "../stores/toast";
@@ -21,7 +21,7 @@ export default function CopyDialog() {
 
   const [targetId, setTargetId] = useState<string>("");
   const [targetNs, setTargetNs] = useState("");
-  const [refs, setRefs] = useState<RefStatus[] | null>(null);
+  const [refs, setRefs] = useState<RelatedRef[] | null>(null);
   const [refsError, setRefsError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<null | "dry" | "copy">(null);
@@ -39,11 +39,11 @@ export default function CopyDialog() {
     setRefs(null);
     setRefsError(null);
     ipc
-      .workloadReferences(target.kind, target.namespace, target.name)
+      .relatedObjects(target.kind, target.namespace, target.name)
       .then((r) => {
         setRefs(r);
-        // ConfigMaps on by default; Secrets are opt-in.
-        setPicked(new Set(r.filter((x) => x.copyable && x.exists && x.kind === "ConfigMap").map(refKey)));
+        // Safe related objects on by default; Secrets and PVCs are opt-in.
+        setPicked(new Set(r.filter((x) => x.exists && x.defaultSelected).map(refKey)));
       })
       .catch((e) => setRefsError(errorMessage(e)));
   }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -81,7 +81,7 @@ export default function CopyDialog() {
     }
   };
 
-  const toggle = (r: RefStatus) =>
+  const toggle = (r: RelatedRef) =>
     setPicked((s) => {
       const n = new Set(s);
       if (n.has(refKey(r))) n.delete(refKey(r));
@@ -129,34 +129,28 @@ export default function CopyDialog() {
         )}
 
         <section>
-          <h3 className="field-label">Dependencies found in the pod spec</h3>
+          <h3 className="field-label">Bring along</h3>
           {refsError ? (
             <p className="text-xs text-critical">{refsError}</p>
           ) : refs == null ? (
             <Spinner />
           ) : refs.length === 0 ? (
-            <p className="text-xs text-content-muted">None: no ConfigMaps, Secrets, volumes or service account referenced.</p>
+            <p className="text-xs text-content-muted">Nothing related found: no config, Services, Ingresses or autoscalers point at it.</p>
           ) : (
             <div className="flex flex-col gap-1 rounded-md bg-muted p-2">
               {refs.map((r) => (
-                <label key={refKey(r)} className={`flex items-center gap-2 text-xs ${r.copyable && r.exists ? "cursor-pointer" : ""}`}>
+                <label key={refKey(r)} className={`flex items-center gap-2 text-xs ${r.exists ? "cursor-pointer" : ""}`}>
                   <input
                     type="checkbox"
                     className="accent-brand"
-                    disabled={!r.copyable || !r.exists}
+                    disabled={!r.exists}
                     checked={picked.has(refKey(r))}
                     onChange={() => toggle(r)}
                   />
                   <span className="w-44 shrink-0 truncate text-content-muted" title={r.kind}>{r.kind}</span>
                   <span className="mono text-content">{r.name}</span>
-                  <span className="ml-auto text-[11px] text-content-muted">
-                    {!r.exists
-                      ? "not found in source"
-                      : !r.copyable
-                        ? "not copied — must exist on target"
-                        : r.kind === "Secret"
-                          ? "contains credentials"
-                          : ""}
+                  <span className="ml-auto min-w-0 truncate text-[11px] text-content-muted" title={r.reason}>
+                    {r.exists ? r.reason : "not found in source"}
                   </span>
                 </label>
               ))}

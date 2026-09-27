@@ -6,6 +6,8 @@ export type Page =
   | "problems"
   | "pods"
   | "workloads"
+  | "services"
+  | "config"
   | "nodes"
   | "events"
   | "logs"
@@ -33,6 +35,12 @@ interface NavState {
   editor: ManifestTarget | null;
   /** Copy-to-cluster dialog. */
   copy: ManifestTarget | null;
+  /** Export-with-related dialog. */
+  exporting: ManifestTarget | null;
+  /** ConfigMap / Secret key-value editor. */
+  config: ManifestTarget | null;
+  /** Start-port-forward dialog for a Service. */
+  forward: { namespace: string; service: string } | null;
   go: (page: Page) => void;
   openLogs: (preset: LogPreset) => void;
   consumeLogPreset: () => LogPreset | null;
@@ -44,6 +52,12 @@ interface NavState {
   closeEditor: () => void;
   openCopy: (t: ManifestTarget) => void;
   closeCopy: () => void;
+  openExport: (t: ManifestTarget) => void;
+  closeExport: () => void;
+  openConfig: (t: ManifestTarget) => void;
+  closeConfig: () => void;
+  openForward: (namespace: string, service: string) => void;
+  closeForward: () => void;
 }
 
 export const useNavStore = create<NavState>((set, get) => ({
@@ -53,6 +67,9 @@ export const useNavStore = create<NavState>((set, get) => ({
   node: null,
   editor: null,
   copy: null,
+  exporting: null,
+  config: null,
+  forward: null,
   go: (page) => set({ page }),
   openLogs: (preset) => set({ page: "logs", logPreset: preset, pod: null, node: null }),
   consumeLogPreset: () => {
@@ -68,4 +85,10 @@ export const useNavStore = create<NavState>((set, get) => ({
   closeEditor: () => set({ editor: null }),
   openCopy: (t) => set({ copy: t }),
   closeCopy: () => set({ copy: null }),
+  openExport: (t) => set({ exporting: t }),
+  closeExport: () => set({ exporting: null }),
+  openConfig: (t) => set({ config: t, pod: null, node: null, editor: null }),
+  closeConfig: () => set({ config: null }),
+  openForward: (namespace, service) => set({ forward: { namespace, service } }),
+  closeForward: () => set({ forward: null }),
 }));

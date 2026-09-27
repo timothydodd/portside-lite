@@ -11,7 +11,7 @@ import YamlEditor from "./YamlEditor";
 
 /** Drawer for editing a workload's YAML and applying it back to the cluster. */
 export default function ManifestEditor() {
-  const { editor: target, closeEditor, openCopy } = useNavStore();
+  const { editor: target, closeEditor, openCopy, openExport } = useNavStore();
   const [original, setOriginal] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -71,7 +71,13 @@ export default function ManifestEditor() {
     }
   };
 
+  const isWorkload = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].includes(target.kind);
+
   const exportClean = async () => {
+    if (isWorkload) {
+      openExport(target); // pick related Services/config to include
+      return;
+    }
     setBusy("export");
     try {
       const y = await ipc.exportManifests(target.kind, target.namespace, target.name);
@@ -97,9 +103,11 @@ export default function ManifestEditor() {
           <button className="btn-ghost" onClick={() => void exportClean()} disabled={!!busy} title="Save a clean, re-appliable copy to a file">
             {busy === "export" ? <Spinner size={14} /> : <Download size={14} />} Export
           </button>
-          <button className="btn-ghost" onClick={() => openCopy(target)} disabled={!!busy}>
-            <Copy size={14} /> Copy to cluster
-          </button>
+          {isWorkload && (
+            <button className="btn-ghost" onClick={() => openCopy(target)} disabled={!!busy}>
+              <Copy size={14} /> Copy to cluster
+            </button>
+          )}
           <button className="btn-ghost" onClick={() => void run(true)} disabled={!!busy || original == null} title="Ask the server to validate without changing anything">
             {busy === "dry" ? <Spinner size={14} /> : <FlaskConical size={14} />} Dry run
           </button>

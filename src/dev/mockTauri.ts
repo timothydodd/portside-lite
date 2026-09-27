@@ -256,6 +256,19 @@ const snapshot: ClusterSnapshot = {
     { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H },
   ],
   volumes: [],
+  services: [
+    { namespace: "apps", name: "web-frontend", type: "LoadBalancer", clusterIp: "10.43.12.7", external: ["192.168.1.240"], ports: [{ name: "http", port: 80, targetPort: "8080", nodePort: 31080, protocol: "TCP" }], selector: { app: "web-frontend" }, podsMatched: 2, podsReady: 2, podNames: ["web-frontend-5c8d7f9b4-abcde", "web-frontend-5c8d7f9b4-fghij"], routes: ["shop.lan/ (web)"], createdMs: now - 30 * 86_400_000 },
+    { namespace: "apps", name: "billing-api", type: "ClusterIP", clusterIp: "10.43.40.2", external: [], ports: [{ name: null, port: 8080, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "billing-api" }, podsMatched: 2, podsReady: 1, podNames: ["billing-api-7d9f8b6c5-x2k4p", "billing-api-7d9f8b6c5-q9z1m"], routes: ["shop.lan/api (web)"], createdMs: now - 30 * 86_400_000 },
+    { namespace: "data", name: "postgres", type: "ClusterIP", clusterIp: "10.43.9.9", external: [], ports: [{ name: "pg", port: 5432, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "postgres" }, podsMatched: 0, podsReady: 0, podNames: [], routes: [], createdMs: now - 1 * H },
+    { namespace: "apps", name: "reports", type: "ClusterIP", clusterIp: "10.43.3.3", external: [], ports: [{ name: null, port: 80, targetPort: "8000", nodePort: null, protocol: "TCP" }], selector: { app: "reportz" }, podsMatched: 0, podsReady: 0, podNames: [], routes: [], createdMs: now - 3 * 86_400_000 },
+  ],
+  configs: [
+    { kind: "ConfigMap", namespace: "apps", name: "billing-api-config", secretType: null, keys: ["DB_HOST", "LOG_LEVEL", "app.properties"], sizeBytes: 812, immutable: false, usedBy: ["Deployment/billing-api"], createdMs: now - 30 * 86_400_000 },
+    { kind: "ConfigMap", namespace: "apps", name: "web-frontend-config", secretType: null, keys: ["nginx.conf"], sizeBytes: 2048, immutable: false, usedBy: ["Deployment/web-frontend"], createdMs: now - 30 * 86_400_000 },
+    { kind: "ConfigMap", namespace: "kube-system", name: "kube-root-ca.crt", secretType: null, keys: ["ca.crt"], sizeBytes: 570, immutable: false, usedBy: [], createdMs: now - 90 * 86_400_000 },
+    { kind: "Secret", namespace: "apps", name: "billing-api-secrets", secretType: "Opaque", keys: ["DB_PASSWORD", "STRIPE_KEY"], sizeBytes: 64, immutable: false, usedBy: ["Deployment/billing-api"], createdMs: now - 30 * 86_400_000 },
+    { kind: "Secret", namespace: "apps", name: "sh.helm.release.v1.web.v3", secretType: "helm.sh/release.v1", keys: ["release"], sizeBytes: 9200, immutable: false, usedBy: [], createdMs: now - 9 * 86_400_000 },
+  ],
   events: [
     { namespace: "kube-system", objectKind: "Pod", objectName: "svclb-traefik-4c2d9a7f-very-long-generated-name-xk2p9", reason: "FailedCreatePodSandBox", message: "Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox: plugin type=\"flannel\" failed (add): open /run/flannel/subnet.env: no such file or directory", type: "Warning", count: 31, firstMs: now - 20 * 60_000, lastMs: now - 30_000, source: "kubelet" },
     { namespace: "data", objectKind: "PersistentVolumeClaim", objectName: "data-postgres-0", reason: "ProvisioningFailed", message: "storageclass.storage.k8s.io \"fast-ssd\" not found", type: "Warning", count: 4, firstMs: now - 40 * 60_000, lastMs: now - 2 * 60_000, source: "persistentvolume-controller" },
@@ -378,11 +391,46 @@ const handlers: Record<string, (a: Args) => unknown> = {
     `apiVersion: apps/v1\nkind: ${a.kind}\nmetadata:\n  name: ${a.name}\n  namespace: ${a.namespace}\n  resourceVersion: "48213"\n  labels:\n    app: ${a.name}\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: ${a.name}\n  template:\n    metadata:\n      labels:\n        app: ${a.name}\n    spec:\n      containers:\n      - name: app\n        image: ghcr.io/example/${a.name}:2.0.0\n        envFrom:\n        - configMapRef:\n            name: ${a.name}-config\n`,
   apply_manifest: (a) => `deployments/${a.name} ${a.dryRun ? "validated (dry run, nothing changed)" : "configured"}`,
   save_text_file: () => null,
-  workload_references: (a) => [
-    { kind: "ConfigMap", name: `${a.name}-config`, exists: true, copyable: true },
-    { kind: "Secret", name: `${a.name}-secrets`, exists: true, copyable: true },
-    { kind: "PersistentVolumeClaim", name: `${a.name}-data`, exists: true, copyable: false },
+  related_objects: (a) => [
+    { kind: "ConfigMap", name: `${a.name}-config`, reason: "used by its pods", exists: true, sensitive: false, defaultSelected: true },
+    { kind: "Secret", name: `${a.name}-secrets`, reason: "used by its pods (contains credentials)", exists: true, sensitive: true, defaultSelected: false },
+    { kind: "PersistentVolumeClaim", name: `${a.name}-data`, reason: "mounted by its pods; data isn't included, only the claim", exists: true, sensitive: false, defaultSelected: false },
+    { kind: "Service", name: a.name as string, reason: "selects its pods", exists: true, sensitive: false, defaultSelected: true },
+    { kind: "Ingress", name: "web", reason: `routes to Service ${a.name}`, exists: true, sensitive: false, defaultSelected: true },
   ],
+  export_bundle: (a) => `# ${(a.extras as unknown[]).length + 1} objects\napiVersion: v1\nkind: Service\nmetadata:\n  name: ${a.name}\n---\napiVersion: apps/v1\nkind: ${a.kind}\nmetadata:\n  name: ${a.name}\n`,
+  get_config: (a) => ({
+    kind: a.kind,
+    namespace: a.namespace,
+    name: a.name,
+    resourceVersion: "5501",
+    secretType: a.kind === "Secret" ? "Opaque" : null,
+    immutable: false,
+    entries:
+      a.kind === "Secret"
+        ? [
+            { key: "DB_PASSWORD", value: "hunter2-not-real", binary: false, size: 16 },
+            { key: "STRIPE_KEY", value: "sk_test_demo", binary: false, size: 12 },
+            { key: "keystore.p12", value: null, binary: true, size: 2412 },
+          ]
+        : [
+            { key: "DB_HOST", value: "postgres.data.svc", binary: false, size: 17 },
+            { key: "LOG_LEVEL", value: "info", binary: false, size: 4 },
+            { key: "app.properties", value: "retries=3\ntimeout=30s\n", binary: false, size: 22 },
+          ],
+  }),
+  save_config: (a) => ({
+    kind: a.kind,
+    namespace: a.namespace,
+    name: a.name,
+    resourceVersion: "5502",
+    secretType: a.kind === "Secret" ? "Opaque" : null,
+    immutable: false,
+    entries: [
+      ...Object.entries(a.text as Record<string, string>).map(([key, value]) => ({ key, value, binary: false, size: value.length })),
+      ...(a.keepBinary as string[]).map((key) => ({ key, value: null, binary: true, size: 2412 })),
+    ].sort((x, y) => x.key.localeCompare(y.key)),
+  }),
   copy_to_cluster: (a) => [
     ...(a.extras as { kind: string; name: string }[]).map((e) => ({ ...e, outcome: "created", message: null })),
     { kind: a.kind, name: a.name, outcome: "created", message: null },
@@ -410,6 +458,25 @@ const handlers: Record<string, (a: Args) => unknown> = {
       .sort((x, y) => order(x.kind!) - order(y.kind!))
       .map((d) => ({ index: d.index, source: d.source, kind: d.kind, name: d.name, namespace: (a.namespaceOverride as string) || d.namespace || "default", outcome: "created", message: null }));
   },
+  list_port_forwards: () => mockForwards,
+  start_port_forward: (a) => {
+    if (mockForwards.some((f) => f.service === a.service && f.servicePort === a.servicePort))
+      throw `${a.service}:${a.servicePort} is already forwarded`;
+    const sp = a.servicePort as number;
+    const f = {
+      id: mockForwards.length + 1, profileId: "homelab", clusterName: "Homelab", namespace: a.namespace, service: a.service, servicePort: sp,
+      localPort: (a.localPort as number | null) ?? (sp === 80 ? 8080 : sp === 443 ? 8443 : sp >= 1024 ? sp : 10000 + sp),
+      pod: `${a.service}-5c8d7f9b4-abcde`, targetPort: 8080, activeConnections: 0, totalConnections: 0, lastError: null, startedMs: Date.now(),
+    };
+    mockForwards = [...mockForwards, f];
+    emitMock("forwards:changed", mockForwards);
+    return f;
+  },
+  stop_port_forward: (a) => {
+    mockForwards = mockForwards.filter((f) => f.id !== a.id);
+    emitMock("forwards:changed", mockForwards);
+    return null;
+  },
   get_manifest: () => "apiVersion: v1\nkind: Pod\nmetadata:\n  name: demo\n  namespace: apps\nspec:\n  containers:\n  - name: app\n    image: ghcr.io/example/app:1.0\n",
 };
 
@@ -435,13 +502,32 @@ function mockParse(sources: { name: string; content: string }[]) {
   return out;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let mockForwards: any[] = [];
+/** Minimal event bus so mock commands can push events like the backend does. */
+const mockListeners = new Map<string, number[]>();
+const mockCallbacks = new Map<number, (e: unknown) => void>();
+function emitMock(event: string, payload: unknown) {
+  for (const id of mockListeners.get(event) ?? []) mockCallbacks.get(id)?.({ event, id, payload });
+}
+
 let cbId = 0;
 const w = window as unknown as Record<string, unknown>;
 w.__TAURI_INTERNALS__ = {
-  transformCallback: () => ++cbId,
+  transformCallback: (cb: (e: unknown) => void) => {
+    const id = ++cbId;
+    mockCallbacks.set(id, cb);
+    return id;
+  },
   unregisterCallback: () => undefined,
   invoke: async (cmd: string, args: Args) => {
+    if (cmd === "plugin:event|listen") {
+      const { event, handler } = args as { event: string; handler: number };
+      mockListeners.set(event, [...(mockListeners.get(event) ?? []), handler]);
+      return handler;
+    }
     if (cmd.startsWith("plugin:event|")) return ++cbId;
+    if (cmd.startsWith("plugin:opener|")) return null;
     // plugin-dialog's confirm() sends `message` and treats "Ok" as confirmed.
     if (cmd === "plugin:dialog|message") return window.confirm(String(args.message)) ? "Ok" : "Cancel";
     if (cmd === "plugin:dialog|open") return ["C:\\demo\\shop.yaml", "C:\\demo\\bad.yaml"];

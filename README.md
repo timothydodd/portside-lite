@@ -25,10 +25,21 @@ Tauri 2 + Rust backend, React + TypeScript frontend.
   remembers the replica count (an annotation on the object) so Restore brings
   it back. Delete asks you to type the name and offers a YAML backup first. Destructive actions
   ask first.
+- **Services and configuration.** Services with live endpoint health (how many pods each selector
+  actually matches, and how many are ready), plus the Ingress routes to each; a Service with no
+  endpoints is flagged as a problem. ConfigMaps and Secrets with key names and the workloads that
+  use each, and a key/value editor (Secret values decoded and masked) that offers to restart
+  dependent workloads after saving.
+- **Port-forwarding.** Forward any Service port to `localhost` (80→8080, 443→8443 by default,
+  or pick one) to test an app or open a site from your machine; it works over SSH too. Unlike
+  `kubectl port-forward`, a forward survives pod restarts and rollouts: each new connection goes to
+  a Ready pod. It listens on 127.0.0.1 only.
 - **Edits, exports and copies workloads.** Edit a workload's YAML in-app, with
   a dry-run check before applying. Saves work like `kubectl edit`: if the
   object changed on the cluster meanwhile, the save is refused. Export clean,
-  re-appliable YAML for one workload or a whole kind/namespace, or copy a
+  re-appliable YAML for one workload together with the objects that make it run (its
+  ConfigMaps, Secrets, ServiceAccount, PVCs, the Services selecting its pods, Ingresses routing to
+  those, HPAs — you choose), or a whole kind/namespace, or copy a
   workload to any saved cluster or namespace, optionally bringing the
   ConfigMaps and Secrets it references. **Import** applies one or many YAML
   files, or pasted YAML (multi-document and `kind: List` included), to any
