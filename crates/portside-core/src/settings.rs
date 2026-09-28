@@ -140,6 +140,9 @@ pub struct Settings {
     pub background_check_minutes: u32,
     /// All polling, log pulls and background checks stopped (tray toggle).
     pub monitoring_paused: bool,
+    /// Where workload archives are kept; `None` = `archives` in the app's
+    /// data folder.
+    pub archive_dir: Option<String>,
 }
 
 impl Default for Settings {
@@ -163,6 +166,7 @@ impl Default for Settings {
             notify_warnings: false,
             background_check_minutes: 15,
             monitoring_paused: false,
+            archive_dir: None,
         }
     }
 }

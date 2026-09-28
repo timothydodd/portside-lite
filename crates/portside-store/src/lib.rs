@@ -3,9 +3,13 @@
 //! history. Synchronous by design — the Tauri layer calls it from a blocking
 //! thread. No Tauri dependency.
 
+pub mod archive;
+
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
+use portside_core::archive::{owner_matches, pod_name_matches};
 use portside_core::{logline::Level, Issue, LogRecord, Settings};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -16,6 +20,10 @@ pub enum StoreError {
     Db(#[from] rusqlite::Error),
     #[error("settings are corrupt: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Invalid(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -88,6 +96,19 @@ CREATE TABLE IF NOT EXISTS log_cursors (
   PRIMARY KEY (cluster, pod_uid, container)
 );
 
+-- Which workload each pod belonged to, so its stored logs stay findable by
+-- workload after the pod (or the whole workload) is gone.
+CREATE TABLE IF NOT EXISTS pod_owners (
+  cluster       TEXT NOT NULL,
+  namespace     TEXT NOT NULL,
+  pod           TEXT NOT NULL,
+  owner_kind    TEXT NOT NULL,
+  owner_name    TEXT NOT NULL,
+  first_seen_ms INTEGER NOT NULL,
+  last_seen_ms  INTEGER NOT NULL,
+  PRIMARY KEY (cluster, namespace, pod)
+);
+
 CREATE TABLE IF NOT EXISTS issue_history (
   id            INTEGER PRIMARY KEY,
   cluster       TEXT NOT NULL,
@@ -158,6 +179,9 @@ pub struct LogQuery {
     pub namespace: Option<String>,
     pub pod: Option<String>,
     pub container: Option<String>,
+    /// Only pods of this workload (in `namespace`, which is then required),
+    /// including pods that no longer exist.
+    pub workload: Option<WorkloadRef>,
     /// Level names; empty = all.
     pub levels: Vec<String>,
     pub since_ms: Option<i64>,
@@ -165,6 +189,30 @@ pub struct LogQuery {
     /// Keyset pagination: only rows older than this id.
     pub before_id: Option<i64>,
     pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadRef {
+    pub kind: String,
+    pub name: String,
+}
+
+/// A pod that has lines in the store, alive or not.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSource {
+    pub namespace: String,
+    pub pod: String,
+    /// Recorded controller (ReplicaSets folded into their Deployment); `None`
+    /// for pods only seen before owners were recorded.
+    pub owner_kind: Option<String>,
+    pub owner_name: Option<String>,
+    pub lines: i64,
+    pub errors: i64,
+    pub warnings: i64,
+    pub first_ms: i64,
+    pub last_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -399,7 +447,8 @@ impl Store {
     }
 
     /// Build the shared WHERE clause for log queries. Returns (sql, params).
-    fn log_filter(cluster: &str, q: &LogQuery) -> (String, Vec<rusqlite::types::Value>) {
+    /// `pods` is the workload filter already resolved to pod names.
+    fn log_filter(cluster: &str, q: &LogQuery, pods: Option<&[String]>) -> (String, Vec<rusqlite::types::Value>) {
         use rusqlite::types::Value;
         let mut sql = String::from("l.cluster = ?");
         let mut p: Vec<Value> = vec![Value::Text(cluster.into())];
@@ -411,6 +460,14 @@ impl Store {
             if let Some(v) = val.as_deref().filter(|v| !v.is_empty()) {
                 sql.push_str(&format!(" AND l.{col} = ?"));
                 p.push(Value::Text(v.into()));
+            }
+        }
+        if let Some(pods) = pods {
+            if pods.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                sql.push_str(&format!(" AND l.pod IN ({})", vec!["?"; pods.len()].join(",")));
+                p.extend(pods.iter().map(|n| Value::Text(n.clone())));
             }
         }
         let levels: Vec<i64> = q.levels.iter().filter_map(|l| level_from_name(l)).collect();
@@ -432,7 +489,9 @@ impl Store {
     /// Newest-first page of log lines.
     pub fn query_logs(&self, cluster: &str, q: &LogQuery) -> Result<Vec<LogRecord>> {
         use rusqlite::types::Value;
-        let (mut filter, mut p) = Self::log_filter(cluster, q);
+        let conn = self.conn.lock().unwrap();
+        let pods = Self::query_pods(&conn, cluster, q)?;
+        let (mut filter, mut p) = Self::log_filter(cluster, q, pods.as_deref());
         if let Some(b) = q.before_id {
             filter.push_str(" AND l.id < ?");
             p.push(Value::Integer(b));
@@ -442,7 +501,6 @@ impl Store {
             "SELECT l.id, l.ts_ns, l.namespace, l.pod, l.container, l.level, l.message
              FROM logs l WHERE {filter} ORDER BY l.id DESC LIMIT {limit}"
         );
-        let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(p), |r| {
             Ok(LogRecord {
@@ -461,7 +519,9 @@ impl Store {
     /// Log volume per level in `bucket_ms` buckets, honoring the same filters
     /// as [`Store::query_logs`].
     pub fn log_histogram(&self, cluster: &str, q: &LogQuery, bucket_ms: i64) -> Result<Vec<HistogramBucket>> {
-        let (filter, filter_params) = Self::log_filter(cluster, q);
+        let conn = self.conn.lock().unwrap();
+        let pods = Self::query_pods(&conn, cluster, q)?;
+        let (filter, filter_params) = Self::log_filter(cluster, q, pods.as_deref());
         let bucket_ns = rusqlite::types::Value::Integer(bucket_ms.max(1) * 1_000_000);
         // The bucket width binds first (twice, in the SELECT), then the filter.
         let mut p = vec![bucket_ns.clone(), bucket_ns];
@@ -470,7 +530,6 @@ impl Store {
             "SELECT (l.ts_ns / ?) * ? AS b, l.level, COUNT(*) FROM logs l
              WHERE {filter} GROUP BY b, l.level ORDER BY b"
         );
-        let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(p))?;
         let mut out: Vec<HistogramBucket> = Vec::new();
@@ -491,6 +550,163 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// The workload filter of `q` resolved to pod names (`None` = no filter).
+    fn query_pods(conn: &Connection, cluster: &str, q: &LogQuery) -> Result<Option<Vec<String>>> {
+        let Some(w) = &q.workload else { return Ok(None) };
+        let ns = q
+            .namespace
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| StoreError::Invalid("a workload filter needs a namespace".into()))?;
+        Ok(Some(Self::workload_pods(conn, cluster, ns, &w.kind, &w.name)?))
+    }
+
+    /// Every pod of a workload that has ever been seen: pods with a recorded
+    /// owner, plus (for lines stored before owners were recorded) unowned
+    /// pods whose name has the controller's shape.
+    fn workload_pods(conn: &Connection, cluster: &str, namespace: &str, kind: &str, name: &str) -> Result<Vec<String>> {
+        let mut known = HashSet::new();
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare_cached("SELECT pod, owner_kind, owner_name FROM pod_owners WHERE cluster = ?1 AND namespace = ?2")?;
+        let mut rows = stmt.query(params![cluster, namespace])?;
+        while let Some(r) = rows.next()? {
+            let (pod, ok, on): (String, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+            if owner_matches(kind, name, &ok, &on) {
+                out.push(pod.clone());
+            }
+            known.insert(pod);
+        }
+        let mut stmt = conn.prepare_cached("SELECT DISTINCT pod FROM logs WHERE cluster = ?1 AND namespace = ?2")?;
+        let mut rows = stmt.query(params![cluster, namespace])?;
+        while let Some(r) = rows.next()? {
+            let pod: String = r.get(0)?;
+            if !known.contains(&pod) && pod_name_matches(kind, name, &pod) {
+                out.push(pod);
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Remember which workload each live pod belongs to. `pods` is
+    /// (namespace, pod, owner kind, owner name).
+    pub fn record_pod_owners(&self, cluster: &str, now_ms: i64, pods: &[(String, String, String, String)]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut up = tx.prepare_cached(
+                "INSERT INTO pod_owners (cluster, namespace, pod, owner_kind, owner_name, first_seen_ms, last_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT (cluster, namespace, pod) DO UPDATE SET
+                   owner_kind = excluded.owner_kind,
+                   owner_name = excluded.owner_name,
+                   last_seen_ms = excluded.last_seen_ms",
+            )?;
+            for (ns, pod, kind, name) in pods {
+                up.execute(params![cluster, ns, pod, kind, name, now_ms])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Pods with stored lines, newest activity first, optionally limited to
+    /// one namespace and/or one workload. Includes pods that no longer exist.
+    pub fn log_sources(&self, cluster: &str, namespace: Option<&str>, workload: Option<&WorkloadRef>) -> Result<Vec<LogSource>> {
+        use rusqlite::types::Value;
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from(
+            "SELECT l.namespace, l.pod, COUNT(*), SUM(l.level = 4), SUM(l.level = 3), MIN(l.ts_ns), MAX(l.ts_ns),
+                    o.owner_kind, o.owner_name
+             FROM logs l LEFT JOIN pod_owners o
+               ON o.cluster = l.cluster AND o.namespace = l.namespace AND o.pod = l.pod
+             WHERE l.cluster = ?",
+        );
+        let mut p: Vec<Value> = vec![Value::Text(cluster.into())];
+        if let Some(ns) = namespace.filter(|n| !n.is_empty()) {
+            sql.push_str(" AND l.namespace = ?");
+            p.push(Value::Text(ns.into()));
+        }
+        let q = LogQuery { namespace: namespace.map(str::to_string), workload: workload.cloned(), ..Default::default() };
+        if let Some(pods) = Self::query_pods(&conn, cluster, &q)? {
+            if pods.is_empty() {
+                return Ok(Vec::new());
+            }
+            sql.push_str(&format!(" AND l.pod IN ({})", vec!["?"; pods.len()].join(",")));
+            p.extend(pods.into_iter().map(Value::Text));
+        }
+        sql.push_str(" GROUP BY l.namespace, l.pod ORDER BY MAX(l.ts_ns) DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(p), |r| {
+            Ok(LogSource {
+                namespace: r.get(0)?,
+                pod: r.get(1)?,
+                lines: r.get(2)?,
+                errors: r.get(3)?,
+                warnings: r.get(4)?,
+                first_ms: r.get::<_, i64>(5)? / 1_000_000,
+                last_ms: r.get::<_, i64>(6)? / 1_000_000,
+                owner_kind: r.get(7)?,
+                owner_name: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Write every stored line of a workload, oldest first, as
+    /// `<RFC 3339 time> <LEVEL> <pod>/<container> <message>`. Pages through the
+    /// table so the lock isn't held for the whole export. Returns the line count.
+    pub fn write_workload_logs(
+        &self,
+        cluster: &str,
+        namespace: &str,
+        workload: &WorkloadRef,
+        out: &mut dyn std::io::Write,
+    ) -> Result<usize> {
+        use rusqlite::types::Value;
+        const PAGE: usize = 5_000;
+        let pods = {
+            let conn = self.conn.lock().unwrap();
+            Self::workload_pods(&conn, cluster, namespace, &workload.kind, &workload.name)?
+        };
+        if pods.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "SELECT id, ts_ns, pod, container, level, message FROM logs
+             WHERE cluster = ? AND namespace = ? AND pod IN ({}) AND (ts_ns, id) > (?, ?)
+             ORDER BY ts_ns, id LIMIT {PAGE}",
+            vec!["?"; pods.len()].join(",")
+        );
+        let (mut after_ts, mut after_id, mut written) = (i64::MIN, i64::MIN, 0usize);
+        loop {
+            let page: Vec<(i64, i64, String, String, i64, String)> = {
+                let conn = self.conn.lock().unwrap();
+                let mut p: Vec<Value> = vec![Value::Text(cluster.into()), Value::Text(namespace.into())];
+                p.extend(pods.iter().map(|n| Value::Text(n.clone())));
+                p.push(Value::Integer(after_ts));
+                p.push(Value::Integer(after_id));
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let rows = stmt.query_map(params_from_iter(p), |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (id, ts, pod, container, level, message) in &page {
+                let time = portside_core::jiff::Timestamp::from_nanosecond(*ts as i128)
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|_| ts.to_string());
+                writeln!(out, "{time} {:<7} {pod}/{container} {message}", level_name(*level).to_ascii_uppercase())?;
+                (after_ts, after_id) = (*ts, *id);
+            }
+            written += page.len();
+            if page.len() < PAGE {
+                return Ok(written);
+            }
+        }
     }
 
     /// Pods ranked by error lines since `since_ms`.
@@ -659,6 +875,7 @@ impl Store {
             [cutoff_ms],
         )?;
         tx.execute("DELETE FROM log_cursors WHERE updated_ms < ?1", [cutoff_ms])?;
+        tx.execute("DELETE FROM pod_owners WHERE last_seen_ms < ?1", [cutoff_ms])?;
         tx.commit()?;
         Ok(logs)
     }
@@ -667,7 +884,7 @@ impl Store {
     pub fn clear_cluster(&self, cluster: &str) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        for table in ["logs", "node_samples", "pod_samples", "log_cursors", "issue_history"] {
+        for table in ["logs", "node_samples", "pod_samples", "log_cursors", "issue_history", "pod_owners"] {
             tx.execute(&format!("DELETE FROM {table} WHERE cluster = ?1"), [cluster])?;
         }
         tx.commit()?;
@@ -786,6 +1003,58 @@ mod tests {
             .query_logs("c", &LogQuery { search: Some("database".into()), ..Default::default() })
             .unwrap()
             .is_empty());
+    }
+
+    fn pod_log(pod: &str, ts_ns: i64, level: Level, msg: &str) -> NewLog {
+        NewLog { pod: pod.into(), namespace: "apps".into(), ..log(ts_ns, level, msg) }
+    }
+
+    #[test]
+    fn workload_logs_outlive_their_pods() {
+        let s = Store::open_in_memory().unwrap();
+        let cur = LogCursor { last_ts_ns: 0, restart_count: 0 };
+        for (uid, pod, ts, lvl) in [
+            ("1", "web-7d9f8b6c5-aaaaa", 1_000_000_000, Level::Info), // owner recorded
+            ("2", "web-5c8d7f9b4-bbbbb", 2_000_000_000, Level::Error), // stored before owners existed
+            ("3", "web-api-6f7b9c8d4-ccccc", 3_000_000_000, Level::Info), // a different Deployment
+            ("4", "worker-0", 4_000_000_000, Level::Info),
+        ] {
+            s.append_logs("c", uid, "app", cur, &[pod_log(pod, ts, lvl, &format!("hello from {pod}"))], 0).unwrap();
+        }
+        s.record_pod_owners(
+            "c",
+            10,
+            &[
+                ("apps".into(), "web-7d9f8b6c5-aaaaa".into(), "Deployment".into(), "web".into()),
+                ("apps".into(), "web-api-6f7b9c8d4-ccccc".into(), "Deployment".into(), "web-api".into()),
+            ],
+        )
+        .unwrap();
+
+        let web = WorkloadRef { kind: "Deployment".into(), name: "web".into() };
+        let q = LogQuery { namespace: Some("apps".into()), workload: Some(web.clone()), ..Default::default() };
+        let pods: Vec<String> = s.query_logs("c", &q).unwrap().into_iter().map(|r| r.pod).collect();
+        assert_eq!(pods, vec!["web-5c8d7f9b4-bbbbb", "web-7d9f8b6c5-aaaaa"]);
+        let hist = s.log_histogram("c", &q, 60_000).unwrap();
+        assert_eq!(hist.iter().map(|b| b.info + b.error).sum::<i64>(), 2);
+
+        let no_ns = LogQuery { workload: Some(web.clone()), ..Default::default() };
+        assert!(s.query_logs("c", &no_ns).is_err(), "workload filter needs a namespace");
+
+        let sources = s.log_sources("c", Some("apps"), Some(&web)).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].pod, "web-5c8d7f9b4-bbbbb", "newest first");
+        assert_eq!((sources[0].errors, sources[0].owner_kind.as_deref()), (1, None));
+        assert_eq!(sources[1].owner_name.as_deref(), Some("web"));
+        assert_eq!(s.log_sources("c", None, None).unwrap().len(), 4);
+
+        let mut out = Vec::new();
+        assert_eq!(s.write_workload_logs("c", "apps", &web, &mut out).unwrap(), 2);
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("1970-01-01T00:00:01Z INFO    web-7d9f8b6c5-aaaaa/app hello"), "{}", lines[0]);
+        assert!(lines[1].contains(" ERROR   web-5c8d7f9b4-bbbbb/app "));
     }
 
     #[test]

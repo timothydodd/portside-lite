@@ -3,6 +3,7 @@
 //! detection rules. No IO, no Tauri — everything here is unit-testable.
 
 pub mod alerts;
+pub mod archive;
 pub mod issues;
 pub mod logline;
 pub mod manifest;

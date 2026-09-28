@@ -44,11 +44,18 @@ Tauri 2 + Rust backend, React + TypeScript frontend.
   ConfigMaps and Secrets it references. **Import** applies one or many YAML
   files, or pasted YAML (multi-document and `kind: List` included), to any
   saved cluster in dependency order, with a dry-run preview.
+- **Archives workloads.** Archive saves a workload and the objects it needs (config, Secrets,
+  Services, Ingresses, autoscalers, PVC claims) plus its stored logs to a local folder, then removes
+  it from the cluster. Anything another workload still uses is flagged and left in place. Archived
+  workloads get their own tab under Workloads, where Restore deploys one again (to its own cluster
+  or any other) with a dry run first. The folder is plain YAML, so `kubectl apply -f` works too.
 - **Pulls logs locally.** Container logs are pulled incrementally into SQLite
   with full-text search. When a container restarts, the crashed instance's
   tail is captured as well. You get a log explorer with a clickable volume
   histogram, plus analytics: noisiest pods, recurring error messages (with
-  numbers collapsed so repeats group), restart leaders.
+  numbers collapsed so repeats group), restart leaders. Logs stay searchable by workload after its
+  pods are gone (scaled to 0, redeployed, deleted or archived), and every workload has an overview
+  that opens even when nothing is running.
 - **Runs in the background.** Closing the window hides it to the system tray
   and monitoring continues. You get a desktop notification when any saved
   cluster has a new critical problem or becomes unreachable, once per

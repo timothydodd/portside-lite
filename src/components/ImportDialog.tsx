@@ -17,6 +17,31 @@ export const useImportDialog = create<{ open: boolean; show: () => void; close: 
   close: () => set({ open: false }),
 }));
 
+/** Per-object outcome of an import / restore, in apply order. */
+export function ImportResults({ dryRun, rows }: { dryRun: boolean; rows: ImportResult[] }) {
+  return (
+    <section>
+      <h3 className="field-label">{dryRun ? "Dry run: what would happen (in apply order)" : "Result (in apply order)"}</h3>
+      <div className="flex max-h-48 flex-col gap-1 overflow-auto">
+        {rows.map((r) => (
+          <div key={r.index} className="flex items-start gap-2 text-xs">
+            {r.outcome === "error" ? (
+              <ShieldAlert size={14} className="mt-px shrink-0 text-critical" />
+            ) : (
+              <CheckCircle2 size={14} className="mt-px shrink-0 text-good" />
+            )}
+            <span className="w-32 shrink-0 truncate text-content-muted">{r.kind}</span>
+            <span className="mono w-40 shrink-0 truncate text-content" title={r.name}>{r.name}</span>
+            <span className="min-w-0 flex-1 text-content-secondary">
+              {r.outcome === "error" ? r.message : `${dryRun ? "would be " : ""}${r.outcome}${r.namespace ? ` in ${r.namespace}` : ""}${r.message ? ` · ${r.message}` : ""}`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /** Import one or many YAML files (or pasted YAML) into any saved cluster. */
 export default function ImportDialog() {
   const { open, close } = useImportDialog();
@@ -234,27 +259,7 @@ export default function ImportDialog() {
           </div>
         )}
 
-        {results && (
-          <section>
-            <h3 className="field-label">{results.dryRun ? "Dry run: what would happen (in apply order)" : "Result (in apply order)"}</h3>
-            <div className="flex max-h-48 flex-col gap-1 overflow-auto">
-              {results.rows.map((r) => (
-                <div key={r.index} className="flex items-start gap-2 text-xs">
-                  {r.outcome === "error" ? (
-                    <ShieldAlert size={14} className="mt-px shrink-0 text-critical" />
-                  ) : (
-                    <CheckCircle2 size={14} className="mt-px shrink-0 text-good" />
-                  )}
-                  <span className="w-32 shrink-0 truncate text-content-muted">{r.kind}</span>
-                  <span className="mono w-40 shrink-0 truncate text-content" title={r.name}>{r.name}</span>
-                  <span className="min-w-0 flex-1 text-content-secondary">
-                    {r.outcome === "error" ? r.message : `${results.dryRun ? "would be " : ""}${r.outcome}${r.namespace ? ` in ${r.namespace}` : ""}${r.message ? ` · ${r.message}` : ""}`}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+        {results && <ImportResults dryRun={results.dryRun} rows={results.rows} />}
 
         <div className="flex justify-end gap-2">
           <button className="btn-ghost" onClick={close}>

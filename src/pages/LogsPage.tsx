@@ -2,37 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw, X, ZoomOut } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { errorMessage, fmtCount, fmtDateTime } from "../lib/format";
-import type { HistogramBucket, LogLevel, LogQuery, LogRecord } from "../lib/types";
+import { ownedBy } from "../lib/workloads";
+import { bucketFor, FILTER_LEVELS as LEVELS, LOG_RANGES as RANGES, useDebounced } from "../lib/logs";
+import type { HistogramBucket, LogLevel, LogQuery, LogRecord, LogSource } from "../lib/types";
 import { LOG_LEVEL_SERIES, StackedBars } from "../components/charts";
 import LogView from "../components/LogView";
 import { EmptyState, NamespaceSelect, PageHeader, SearchInput, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 
-const RANGES = [
-  { label: "15m", ms: 15 * 60_000 },
-  { label: "1h", ms: 3600_000 },
-  { label: "6h", ms: 6 * 3600_000 },
-  { label: "24h", ms: 24 * 3600_000 },
-  { label: "7d", ms: 7 * 86_400_000 },
-];
-const LEVELS: LogLevel[] = ["error", "warning", "info", "debug"];
 const PAGE = 500;
-
-/** Pick a bucket width that yields roughly 60 columns. */
-function bucketFor(spanMs: number): number {
-  const steps = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 3600_000, 3 * 3600_000, 6 * 3600_000];
-  return steps.find((s) => spanMs / s <= 80) ?? 12 * 3600_000;
-}
-
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
 
 export default function LogsPage() {
   const snapshot = useClusterStore((s) => s.snapshot);
@@ -44,8 +23,10 @@ export default function LogsPage() {
   const [search, setSearch] = useState("");
   const [namespace, setNamespace] = useState("");
   const [pod, setPod] = useState("");
+  /** "Kind/name": every pod of that workload, gone ones included. */
+  const [workload, setWorkload] = useState("");
   const [levels, setLevels] = useState<Set<LogLevel>>(new Set());
-  const [rangeMs, setRangeMs] = useState(24 * 3600_000);
+  const [rangeMs, setRangeMs] = useState<number | null>(24 * 3600_000);
   /** Zoomed window from clicking a histogram bucket. */
   const [zoom, setZoom] = useState<{ since: number; until: number } | null>(null);
 
@@ -57,6 +38,8 @@ export default function LogsPage() {
     setSearch(p.search ?? "");
     setNamespace(p.namespace ?? "");
     setPod(p.pod ?? "");
+    setWorkload(p.workload ? `${p.workload.kind}/${p.workload.name}` : "");
+    if (p.workload) setRangeMs(null); // its whole stored history
     setLevels(new Set(p.levels ?? []));
     setZoom(null);
   }, [preset, consumePreset]);
@@ -68,23 +51,35 @@ export default function LogsPage() {
   const [error, setError] = useState<string | null>(null);
   const loadingMore = useRef(false);
 
+  // Pods with stored lines, alive or gone: feeds the pod and workload pickers.
+  const [sources, setSources] = useState<LogSource[]>([]);
+  useEffect(() => {
+    ipc.logSources(null, null).then(setSources).catch(() => setSources([]));
+  }, [logTick]);
+
   const debouncedSearch = useDebounced(search, 300);
   const now = useMemo(() => Date.now(), [logTick, rangeMs, zoom]); // eslint-disable-line react-hooks/exhaustive-deps
-  const since = zoom?.since ?? now - rangeMs;
+  const oldest = useMemo(() => (sources.length ? Math.min(...sources.map((s) => s.firstMs)) : now - 86_400_000), [sources, now]);
+  const since = zoom?.since ?? (rangeMs == null ? null : now - rangeMs);
   const until = zoom?.until ?? null;
-  const bucketMs = bucketFor((until ?? now) - since);
+  const bucketMs = bucketFor((until ?? now) - (since ?? oldest));
+  const workloadRef = useMemo(() => {
+    const i = workload.indexOf("/");
+    return i > 0 ? { kind: workload.slice(0, i), name: workload.slice(i + 1) } : null;
+  }, [workload]);
 
   const query: LogQuery = useMemo(
     () => ({
       search: debouncedSearch || null,
       namespace: namespace || null,
+      workload: namespace ? workloadRef : null,
       pod: pod || null,
       levels: [...levels],
       sinceMs: since,
       untilMs: until,
       limit: PAGE,
     }),
-    [debouncedSearch, namespace, pod, levels, since, until],
+    [debouncedSearch, namespace, workloadRef, pod, levels, since, until],
   );
 
   const load = useCallback(async () => {
@@ -116,11 +111,28 @@ export default function LogsPage() {
     }
   }, [hasMore, rows, query]);
 
-  const pods = useMemo(
-    () =>
-      [...new Set((snapshot?.pods ?? []).filter((p) => !namespace || p.namespace === namespace).map((p) => p.name))].sort(),
-    [snapshot, namespace],
-  );
+  // Live pods plus pods that only exist in the store now (scaled down,
+  // replaced, deleted, archived).
+  const alive = useMemo(() => new Set((snapshot?.pods ?? []).map((p) => `${p.namespace}/${p.name}`)), [snapshot]);
+  const pods = useMemo(() => {
+    const inNs = (ns: string) => !namespace || ns === namespace;
+    const inWorkload = (ownerKind: string | null, ownerName: string | null) =>
+      !workloadRef || ownedBy(ownerKind, ownerName, workloadRef.kind, workloadRef.name);
+    const names = new Map<string, boolean>();
+    for (const p of snapshot?.pods ?? []) if (inNs(p.namespace) && inWorkload(p.ownerKind, p.ownerName)) names.set(p.name, true);
+    for (const s of sources)
+      if (inNs(s.namespace) && inWorkload(s.ownerKind, s.ownerName) && !names.has(s.pod)) names.set(s.pod, alive.has(`${s.namespace}/${s.pod}`));
+    return [...names.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, live]) => ({ name, live }));
+  }, [snapshot, sources, namespace, workloadRef, alive]);
+  // Workloads that have had pods in the namespace, including ones no longer on the cluster.
+  const workloads = useMemo(() => {
+    if (!namespace) return [];
+    const set = new Set<string>();
+    for (const w of snapshot?.workloads ?? []) if (w.namespace === namespace) set.add(`${w.kind}/${w.name}`);
+    for (const s of sources) if (s.namespace === namespace && s.ownerKind && s.ownerName) set.add(`${s.ownerKind}/${s.ownerName}`);
+    return [...set].sort();
+  }, [snapshot, sources, namespace]);
+  const liveWorkloads = useMemo(() => new Set((snapshot?.workloads ?? []).map((w) => `${w.namespace}/${w.kind}/${w.name}`)), [snapshot]);
   const total = hist.reduce((s, b) => s + b.trace + b.debug + b.info + b.warning + b.error, 0);
   const errors = hist.reduce((s, b) => s + b.error, 0);
 
@@ -163,15 +175,36 @@ export default function LogsPage() {
           value={namespace}
           onChange={(v) => {
             setNamespace(v);
+            setWorkload("");
             setPod("");
           }}
         />
+        <select
+          className="field max-w-[240px]"
+          value={workload}
+          disabled={!namespace}
+          title={namespace ? "Every pod a workload has had, including gone ones" : "Pick a namespace to filter by workload"}
+          onChange={(e) => {
+            setWorkload(e.target.value);
+            setPod("");
+          }}
+        >
+          <option value="">All workloads</option>
+          {workload && !workloads.includes(workload) && <option value={workload}>{workload}</option>}
+          {workloads.map((w) => (
+            <option key={w} value={w}>
+              {w}
+              {liveWorkloads.has(`${namespace}/${w}`) ? "" : " (gone)"}
+            </option>
+          ))}
+        </select>
         <select className="field max-w-[240px]" value={pod} onChange={(e) => setPod(e.target.value)}>
           <option value="">All pods</option>
-          {pod && !pods.includes(pod) && <option value={pod}>{pod} (gone)</option>}
+          {pod && !pods.some((p) => p.name === pod) && <option value={pod}>{pod} (gone)</option>}
           {pods.map((p) => (
-            <option key={p} value={p}>
-              {p}
+            <option key={p.name} value={p.name}>
+              {p.name}
+              {p.live ? "" : " (gone)"}
             </option>
           ))}
         </select>

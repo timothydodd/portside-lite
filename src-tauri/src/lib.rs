@@ -56,6 +56,8 @@ impl EventSink for TauriSink {
 
 pub struct AppState {
     pub monitor: Arc<Monitor>,
+    /// App data folder; archives default to `archives` inside it.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// The tray's pause/resume item, kept so its label can follow the setting.
@@ -127,7 +129,7 @@ pub fn run() {
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_poll_loop());
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_log_loop());
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_sweep_loop());
-            app.manage(AppState { monitor });
+            app.manage(AppState { monitor, data_dir });
             build_tray(app)?;
             // Windows start hidden (see tauri.conf.json) so `--tray` (used by the
             // installer's "start with Windows" option) never flashes a window.
@@ -202,6 +204,15 @@ pub fn run() {
             commands::start_port_forward,
             commands::stop_port_forward,
             commands::list_port_forwards,
+            commands::log_sources,
+            commands::archive_root,
+            commands::archive_plan,
+            commands::archive_workload,
+            commands::list_archives,
+            commands::archive_manifest,
+            commands::restore_archive,
+            commands::delete_archive,
+            commands::open_archive_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -8,10 +8,14 @@ import type {
   ForwardInfo,
   EventInfo,
   HistogramBucket,
+  ArchiveMeta,
+  ArchiveOutcome,
+  ArchivePlanItem,
   ImportResult,
   IssueHistoryEntry,
   LiveLogLine,
   LogQuery,
+  LogSource,
   LogRecord,
   ManifestDoc,
   ObjectRef,
@@ -22,6 +26,7 @@ import type {
   SourceFile,
   Status,
   StorageStats,
+  WorkloadRef,
 } from "./types";
 
 // --- settings / connection ---
@@ -48,6 +53,8 @@ export const podHistory = (namespace: string, pod: string, sinceMs: number, buck
 export const queryLogs = (query: LogQuery) => invoke<LogRecord[]>("query_logs", { query });
 export const logHistogram = (query: LogQuery, bucketMs: number) =>
   invoke<HistogramBucket[]>("log_histogram", { query, bucketMs });
+export const logSources = (namespace: string | null, workload: WorkloadRef | null) =>
+  invoke<LogSource[]>("log_sources", { namespace, workload });
 export const topErrorPods = (sinceMs: number, limit: number) =>
   invoke<PodLogTotals[]>("top_error_pods", { sinceMs, limit });
 export const podLogCounts = (sinceMs: number) => invoke<PodLogTotals[]>("pod_log_counts", { sinceMs });
@@ -140,3 +147,23 @@ export const startPortForward = (namespace: string, service: string, servicePort
   invoke<ForwardInfo>("start_port_forward", { namespace, service, servicePort, localPort });
 export const stopPortForward = (id: number) => invoke<void>("stop_port_forward", { id });
 export const listPortForwards = () => invoke<ForwardInfo[]>("list_port_forwards");
+
+// --- archives ----------------------------------------------------------------
+
+export const archiveRoot = () => invoke<string>("archive_root");
+export const archivePlan = (kind: string, namespace: string, name: string) =>
+  invoke<ArchivePlanItem[]>("archive_plan", { kind, namespace, name });
+export const archiveWorkload = (
+  kind: string,
+  namespace: string,
+  name: string,
+  keep: ObjectRef[],
+  remove: ObjectRef[],
+  includeLogs: boolean,
+) => invoke<ArchiveOutcome>("archive_workload", { kind, namespace, name, keep, remove, includeLogs });
+export const listArchives = () => invoke<ArchiveMeta[]>("list_archives");
+export const archiveManifest = (id: string) => invoke<string>("archive_manifest", { id });
+export const restoreArchive = (id: string, targetConnectionId: string, namespaceOverride: string | null, dryRun: boolean) =>
+  invoke<ImportResult[]>("restore_archive", { id, targetConnectionId, namespaceOverride, dryRun });
+export const deleteArchive = (id: string) => invoke<void>("delete_archive", { id });
+export const openArchiveFolder = (id: string | null) => invoke<void>("open_archive_folder", { id });

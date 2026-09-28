@@ -305,7 +305,33 @@ let settings: Settings = {
   notifyWarnings: false,
   backgroundCheckMinutes: 15,
   monitoringPaused: false,
+  archiveDir: null,
 };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let mockArchives: any[] = [
+  {
+    id: "ssh_ops_k3s-server_22/apps/deployment-legacy-reports",
+    format: 1,
+    kind: "Deployment",
+    namespace: "apps",
+    name: "legacy-reports",
+    clusterId: "ssh:ops@k3s-server:22",
+    profileId: "homelab",
+    connectionName: "Homelab",
+    archivedMs: now - 3 * 86_400_000,
+    replicas: 2,
+    images: ["ghcr.io/example/legacy-reports:0.9.1"],
+    objects: [
+      { kind: "ConfigMap", name: "legacy-reports-config", removed: true, error: null },
+      { kind: "Service", name: "legacy-reports", removed: true, error: null },
+      { kind: "Deployment", name: "legacy-reports", removed: true, error: null },
+    ],
+    logLines: 18_422,
+    restoredMs: null,
+    restoredTo: null,
+  },
+];
 
 const MESSAGES: [LogLevel, string][] = [
   ["info", "GET /api/invoices 200 12ms"],
@@ -353,17 +379,19 @@ const handlers: Record<string, (a: Args) => unknown> = {
   node_history: (a) => samples(a.sinceMs as number, a.bucketMs as number, 1.6, 6 * GiB),
   pod_history: (a) => samples(a.sinceMs as number, a.bucketMs as number, 0.15, 300 * 1024 ** 2),
   log_histogram: (a) => {
-    const q = a.query as { sinceMs: number; untilMs?: number | null };
-    return histogram(q.sinceMs, q.untilMs ?? now, a.bucketMs as number);
+    const q = a.query as { sinceMs: number | null; untilMs?: number | null };
+    return histogram(q.sinceMs ?? now - 6 * 86_400_000, q.untilMs ?? now, a.bucketMs as number);
   },
   query_logs: (a) => {
-    const q = a.query as { beforeId?: number | null; levels?: LogLevel[] };
+    const q = a.query as { beforeId?: number | null; levels?: LogLevel[]; workload?: { name: string } | null; namespace?: string | null };
     const start = (q.beforeId ?? 100_000) - 1;
     const rows = [];
     for (let i = 0; i < 500 && rows.length < 500; i++) {
       const [level, message] = MESSAGES[(start - i) % MESSAGES.length];
       if (q.levels?.length && !q.levels.includes(level)) continue;
-      const p = pods[(start - i) % 5];
+      const p = q.workload
+        ? { namespace: q.namespace ?? "apps", name: `${q.workload.name}-${(start - i) % 3 ? "7d9f8b6c5-x2k4p" : "5b8c9d7f6-old01"}` }
+        : pods[(start - i) % 5];
       rows.push({ id: start - i, tsMs: now - i * 1700, namespace: p.namespace, pod: p.name, container: "app", level, message });
     }
     return rows;
@@ -477,6 +505,54 @@ const handlers: Record<string, (a: Args) => unknown> = {
     emitMock("forwards:changed", mockForwards);
     return null;
   },
+  log_sources: (a) => {
+    const w = a.workload as { kind: string; name: string } | null;
+    const all = [
+      ...snapshot.pods.map((p) => ({ namespace: p.namespace, pod: p.name, ownerKind: p.ownerKind, ownerName: p.ownerName, lines: 4200, errors: p.restarts ? 310 : 4, warnings: 22, firstMs: now - 5 * 86_400_000, lastMs: now - 60_000 })),
+      { namespace: "apps", pod: "legacy-reports-6c9f7d8b5-q2w3e", ownerKind: "Deployment", ownerName: "legacy-reports", lines: 18_422, errors: 40, warnings: 120, firstMs: now - 6 * 86_400_000, lastMs: now - 3 * 86_400_000 },
+      { namespace: "apps", pod: "billing-api-5b8c9d7f6-old01", ownerKind: "Deployment", ownerName: "billing-api", lines: 9100, errors: 12, warnings: 30, firstMs: now - 6 * 86_400_000, lastMs: now - 2 * 86_400_000 },
+    ];
+    return all.filter((s) => (!a.namespace || s.namespace === a.namespace) && (!w || (s.ownerKind === w.kind && s.ownerName === w.name)));
+  },
+  archive_root: () => "C:\\Users\\demo\\AppData\\Roaming\\portside-lite\\archives",
+  archive_plan: (a) => [
+    { kind: "ConfigMap", name: `${a.name}-config`, reason: "used by its pods", exists: true, sensitive: false, defaultSelected: true, usedBy: [] },
+    { kind: "Secret", name: `${a.name}-secrets`, reason: "used by its pods (contains credentials)", exists: true, sensitive: true, defaultSelected: false, usedBy: [] },
+    { kind: "Secret", name: "ghcr-pull", reason: "used by its pods (contains credentials)", exists: true, sensitive: true, defaultSelected: false, usedBy: ["Deployment/storefront", "Deployment/worker"] },
+    { kind: "PersistentVolumeClaim", name: `${a.name}-data`, reason: "mounted by its pods; data isn't included, only the claim", exists: true, sensitive: false, defaultSelected: false, usedBy: [] },
+    { kind: "Service", name: a.name, reason: "selects its pods", exists: true, sensitive: false, defaultSelected: true, usedBy: [] },
+    { kind: "Ingress", name: "public", reason: `routes to Service ${a.name}`, exists: true, sensitive: false, defaultSelected: true, usedBy: ["Service/storefront"] },
+  ],
+  archive_workload: (a) => {
+    const keep = a.keep as { kind: string; name: string }[];
+    const remove = a.remove as { kind: string; name: string }[];
+    const archive = {
+      id: `ssh_ops_k3s-server_22/${a.namespace}/${(a.kind as string).toLowerCase()}-${a.name}`,
+      format: 1, kind: a.kind, namespace: a.namespace, name: a.name, clusterId: snapshot.clusterId, profileId: "homelab", connectionName: "Homelab",
+      archivedMs: Date.now(), replicas: 2, images: [`ghcr.io/example/${a.name}:1.4.2`],
+      objects: [...keep, { kind: a.kind as string, name: a.name as string }].map((o) => ({ ...o, removed: o.name === a.name || remove.some((r) => r.kind === o.kind && r.name === o.name), error: null })),
+      logLines: a.includeLogs ? 12_345 : 0, restoredMs: null, restoredTo: null,
+    };
+    mockArchives = [archive, ...mockArchives.filter((x) => x.id !== archive.id)];
+    snapshot.workloads = snapshot.workloads.filter((w) => !(w.kind === a.kind && w.namespace === a.namespace && w.name === a.name));
+    emitMock("cluster:snapshot", { ...snapshot });
+    return { archive, results: [{ kind: a.kind, name: a.name, outcome: "removed", message: null }, ...remove.map((r) => ({ ...r, outcome: "removed", message: null }))] };
+  },
+  list_archives: () => mockArchives,
+  archive_manifest: (a) => {
+    const m = mockArchives.find((x) => x.id === a.id);
+    return (m?.objects ?? []).map((o: { kind: string; name: string }) => `apiVersion: v1\nkind: ${o.kind}\nmetadata:\n  name: ${o.name}\n  namespace: ${m.namespace}\n`).join("---\n");
+  },
+  restore_archive: (a) => {
+    const m = mockArchives.find((x) => x.id === a.id);
+    if (!a.dryRun) mockArchives = mockArchives.map((x) => (x.id === a.id ? { ...x, restoredMs: Date.now(), restoredTo: "Homelab" } : x));
+    return (m?.objects ?? []).map((o: { kind: string; name: string }, i: number) => ({ index: i, source: "manifest.yaml", kind: o.kind, name: o.name, namespace: (a.namespaceOverride as string) || m.namespace, outcome: "created", message: null }));
+  },
+  delete_archive: (a) => {
+    mockArchives = mockArchives.filter((x) => x.id !== a.id);
+    return null;
+  },
+  open_archive_folder: () => null,
   get_manifest: () => "apiVersion: v1\nkind: Pod\nmetadata:\n  name: demo\n  namespace: apps\nspec:\n  containers:\n  - name: app\n    image: ghcr.io/example/app:1.0\n",
 };
 

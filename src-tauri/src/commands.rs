@@ -8,7 +8,8 @@ use portside_core::logline::{detect_level, split_timestamp, strip_ansi};
 use portside_core::{ClusterSnapshot, Connection, EventInfo, LogRecord, Settings};
 use portside_monitor::Status;
 use portside_store::{
-    ErrorPattern, HistogramBucket, IssueHistoryEntry, LogQuery, PodLogTotals, Sample, StorageStats, Store,
+    ErrorPattern, HistogramBucket, IssueHistoryEntry, LogQuery, LogSource, PodLogTotals, Sample, StorageStats, Store,
+    WorkloadRef,
 };
 use serde::Serialize;
 use tauri::State;
@@ -551,4 +552,230 @@ pub fn stop_port_forward(state: State<'_, AppState>, id: u64) {
 #[tauri::command]
 pub fn list_port_forwards(state: State<'_, AppState>) -> Vec<portside_monitor::forwards::ForwardInfo> {
     state.monitor.list_forwards()
+}
+
+// --- stored logs by pod / workload --------------------------------------------
+
+/// Pods with stored log lines (alive or gone), optionally for one namespace
+/// and/or workload, newest activity first.
+#[tauri::command]
+pub async fn log_sources(
+    state: State<'_, AppState>,
+    namespace: Option<String>,
+    workload: Option<WorkloadRef>,
+) -> CmdResult<Vec<LogSource>> {
+    with_store(&state, move |s, c| s.log_sources(c, namespace.as_deref(), workload.as_ref())).await
+}
+
+// --- archives -------------------------------------------------------------------
+
+use portside_core::archive::{archive_id, ArchiveMeta, ArchivePlanItem, ArchivedObject, ARCHIVE_FORMAT};
+use portside_core::manifest::{apply_order, ObjectRef};
+use portside_store::archive as archives;
+
+/// Where archives live: the configured folder, else `archives` in app data.
+fn archive_dir(state: &State<'_, AppState>) -> std::path::PathBuf {
+    state
+        .monitor
+        .settings()
+        .archive_dir
+        .filter(|d| !d.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.data_dir.join("archives"))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> portside_store::Result<T> + Send + 'static) -> CmdResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub fn archive_root(state: State<'_, AppState>) -> String {
+    archive_dir(&state).to_string_lossy().into_owned()
+}
+
+/// What archiving a workload would save, and which of those objects other
+/// workloads still use (those shouldn't be removed).
+#[tauri::command]
+pub async fn archive_plan(
+    state: State<'_, AppState>,
+    kind: String,
+    namespace: String,
+    name: String,
+) -> CmdResult<Vec<ArchivePlanItem>> {
+    let cc = state.monitor.client().await?;
+    portside_kube::archive::plan(&cc.client, &kind, &namespace, &name).await.map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveOutcome {
+    archive: ArchiveMeta,
+    /// One row per object removed from the cluster.
+    results: Vec<portside_kube::manifests::CopyResult>,
+}
+
+/// Archive a workload: save it plus `keep` (related objects) to its archive
+/// folder, optionally with its stored logs, and only once that's on disk,
+/// remove the workload and the chosen `remove` objects from the cluster.
+/// `remove` may only name objects that were saved.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn archive_workload(
+    state: State<'_, AppState>,
+    kind: String,
+    namespace: String,
+    name: String,
+    keep: Vec<ObjectRef>,
+    remove: Vec<ObjectRef>,
+    include_logs: bool,
+) -> CmdResult<ArchiveOutcome> {
+    let settings = state.monitor.settings();
+    let profile = settings.active_profile().ok_or("No cluster connection configured.")?.clone();
+    let cluster_id = profile.connection.cluster_id();
+    let cc = state.monitor.client().await?;
+
+    // 1. Everything to save, as one re-appliable file; check it parses back whole.
+    let manifest = portside_kube::manifests::export_bundle(&cc.client, &kind, &namespace, &name, &keep)
+        .await
+        .map_err(err)?;
+    let parsed = portside_core::manifest::parse_sources(&[portside_core::manifest::SourceFile {
+        name: archives::MANIFEST_FILE.into(),
+        content: manifest.clone(),
+    }]);
+    if parsed.len() != keep.len() + 1 || parsed.iter().any(|(d, v)| d.error.is_some() || v.is_none()) {
+        return Err("The exported manifest didn't read back cleanly, so nothing was archived or removed.".into());
+    }
+
+    // 2. Write the archive folder.
+    let workload = ObjectRef { kind: kind.clone(), name: name.clone() };
+    let mut saved: Vec<ObjectRef> = keep.clone();
+    saved.push(workload.clone());
+    saved.sort_by_key(|r| apply_order(&r.kind));
+    let info = state
+        .monitor
+        .snapshot()
+        .and_then(|s| s.workloads.iter().find(|w| w.kind == kind && w.namespace == namespace && w.name == name).cloned());
+    let meta = ArchiveMeta {
+        id: archive_id(&cluster_id, &namespace, &kind, &name),
+        format: ARCHIVE_FORMAT,
+        kind: kind.clone(),
+        namespace: namespace.clone(),
+        name: name.clone(),
+        cluster_id: cluster_id.clone(),
+        profile_id: profile.id.clone(),
+        connection_name: profile.name.clone(),
+        archived_ms: portside_core::now_ms(),
+        replicas: info.as_ref().filter(|_| matches!(kind.as_str(), "Deployment" | "StatefulSet")).map(|w| w.disabled_replicas.unwrap_or(w.desired)),
+        images: info.map(|w| w.images).unwrap_or_default(),
+        objects: saved.iter().map(|r| ArchivedObject { kind: r.kind.clone(), name: r.name.clone(), removed: false, error: None }).collect(),
+        log_lines: 0,
+        restored_ms: None,
+        restored_to: None,
+    };
+    let root = archive_dir(&state);
+    let store = Arc::clone(state.monitor.store());
+    let (c2, ns2, w2) = (cluster_id.clone(), namespace.clone(), WorkloadRef { kind: kind.clone(), name: name.clone() });
+    let root2 = root.clone();
+    let mut meta = blocking(move || {
+        let write_logs = move |out: &mut dyn std::io::Write| store.write_workload_logs(&c2, &ns2, &w2, out);
+        archives::create(&root2, meta, &manifest, include_logs.then_some(&write_logs as &dyn Fn(&mut dyn std::io::Write) -> _))
+    })
+    .await
+    .map_err(|e| format!("Couldn't write the archive to {}: {e}. Nothing was removed.", root.display()))?;
+
+    // 3. Bring it down: the workload always, plus chosen objects that were saved.
+    let mut to_remove: Vec<ObjectRef> = remove.into_iter().filter(|r| keep.contains(r)).collect();
+    to_remove.push(workload);
+    let results = portside_kube::archive::remove_objects(&cc.client, &namespace, &to_remove).await;
+    for r in &results {
+        if let Some(o) = meta.objects.iter_mut().find(|o| o.kind == r.kind && o.name == r.name) {
+            o.removed = r.outcome != "error";
+            o.error = r.message.clone();
+        }
+    }
+    let (root2, meta2) = (root.clone(), meta.clone());
+    blocking(move || archives::save_meta(&root2, &meta2)).await?;
+    state.monitor.refresh_now();
+    Ok(ArchiveOutcome { archive: meta, results })
+}
+
+#[tauri::command]
+pub async fn list_archives(state: State<'_, AppState>) -> CmdResult<Vec<ArchiveMeta>> {
+    let root = archive_dir(&state);
+    blocking(move || archives::list(&root)).await
+}
+
+#[tauri::command]
+pub async fn archive_manifest(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    let root = archive_dir(&state);
+    blocking(move || archives::read_manifest(&root, &id)).await
+}
+
+/// Re-apply an archive's manifest to any saved connection (server-side
+/// apply, dependencies first, missing namespaces created). A clean real run
+/// marks the archive restored; the folder is kept.
+#[tauri::command]
+pub async fn restore_archive(
+    state: State<'_, AppState>,
+    id: String,
+    target_connection_id: String,
+    namespace_override: Option<String>,
+    dry_run: bool,
+) -> CmdResult<Vec<portside_kube::manifests::ImportResult>> {
+    let root = archive_dir(&state);
+    let (root2, id2) = (root.clone(), id.clone());
+    let manifest = blocking(move || archives::read_manifest(&root2, &id2)).await?;
+    let docs: Vec<_> = portside_core::manifest::parse_sources(&[portside_core::manifest::SourceFile {
+        name: archives::MANIFEST_FILE.into(),
+        content: manifest,
+    }])
+    .into_iter()
+    .filter_map(|(d, v)| v.map(|v| (d, v)))
+    .collect();
+    if docs.is_empty() {
+        return Err("The archive's manifest.yaml has no objects in it.".into());
+    }
+    let dst = state.monitor.connect_profile(&target_connection_id).await?;
+    let results = portside_kube::manifests::import_docs(&dst.client, docs, namespace_override.as_deref(), dry_run).await;
+    if !dry_run {
+        if results.iter().all(|r| r.outcome != "error") {
+            let target = state
+                .monitor
+                .settings()
+                .connections
+                .iter()
+                .find(|p| p.id == target_connection_id)
+                .map(|p| p.name.clone());
+            blocking(move || {
+                let mut meta = archives::read_meta(&root, &id)?;
+                meta.restored_ms = Some(portside_core::now_ms());
+                meta.restored_to = target;
+                archives::save_meta(&root, &meta)
+            })
+            .await?;
+        }
+        state.monitor.refresh_now();
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn delete_archive(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let root = archive_dir(&state);
+    blocking(move || archives::delete(&root, &id)).await
+}
+
+/// Open an archive's folder (or the archive root when `id` is null) in the
+/// system file manager.
+#[tauri::command]
+pub fn open_archive_folder(state: State<'_, AppState>, id: Option<String>) -> CmdResult<()> {
+    let root = archive_dir(&state);
+    let path = match id {
+        Some(id) => archives::dir(&root, &id).map_err(err)?,
+        None => {
+            std::fs::create_dir_all(&root).map_err(|e| format!("Couldn't create {}: {e}", root.display()))?;
+            root
+        }
+    };
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
 }

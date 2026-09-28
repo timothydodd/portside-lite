@@ -4,6 +4,7 @@
 //! session, so every read, write and log call behaves identically.
 
 pub mod actions;
+pub mod archive;
 pub mod config;
 pub mod collect;
 pub mod logs;

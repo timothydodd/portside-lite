@@ -391,8 +391,16 @@ impl Monitor {
             .collect();
         let store = Arc::clone(&self.store);
         let cluster2 = cluster.clone();
+        // Remember each pod's workload so its logs stay findable by workload
+        // once the pod (or the workload) is gone.
+        let pod_owners: Vec<(String, String, String, String)> = snap
+            .pods
+            .iter()
+            .filter_map(|p| Some((p.namespace.clone(), p.name.clone(), p.owner_kind.clone()?, p.owner_name.clone()?)))
+            .collect();
         let synced = blocking(move || {
             let _ = store.record_samples(&cluster2, now, &node_samples, &pod_samples);
+            let _ = store.record_pod_owners(&cluster2, now, &pod_owners);
             let mut found = found;
             let _ = store.sync_issues(&cluster2, now, &mut found);
             found

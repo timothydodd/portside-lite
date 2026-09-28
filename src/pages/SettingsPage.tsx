@@ -65,6 +65,7 @@ export default function SettingsPage() {
         <MonitoringSection draft={draft} set={set} />
         <BackgroundSection draft={draft} set={set} />
         <DataSection />
+        <ArchivesSection draft={draft} set={set} saved={saved} />
         <AppearanceSection />
       </div>
     </div>
@@ -595,6 +596,45 @@ function DataSection() {
           Clear this cluster's data
         </button>
       </div>
+    </Section>
+  );
+}
+
+function ArchivesSection({ draft, set, saved }: { draft: Settings; set: (p: Partial<Settings>) => void; saved: Settings | null }) {
+  // The folder in use; only the default when no custom one is saved.
+  const [root, setRoot] = useState("");
+  useEffect(() => {
+    ipc.archiveRoot().then(setRoot).catch(() => setRoot(""));
+  }, [saved?.archiveDir]);
+
+  return (
+    <Section
+      title="Archives"
+      description="Archiving a workload saves its YAML (and stored logs) to a folder here, then removes it from the cluster. Restore it from Workloads → Archived."
+    >
+      <Labeled label="Archive folder" hint={<>In use: <span className="mono">{root || "…"}</span>. Existing archives aren't moved when you change it.</>}>
+        <div className="flex gap-2">
+          <input
+            className="field flex-1"
+            value={draft.archiveDir ?? ""}
+            placeholder={saved?.archiveDir ? "Default: archives in the app data folder" : root || "Default"}
+            onChange={(e) => set({ archiveDir: e.target.value.trim() ? e.target.value : null })}
+          />
+          <button
+            className="btn-ghost"
+            title="Choose a folder"
+            onClick={async () => {
+              const d = await openFile({ multiple: false, directory: true });
+              if (typeof d === "string") set({ archiveDir: d });
+            }}
+          >
+            <FolderOpen size={14} />
+          </button>
+          <button className="btn-ghost" title="Open the folder in use" onClick={() => void ipc.openArchiveFolder(null).catch((e) => toast.error(errorMessage(e)))}>
+            Open
+          </button>
+        </div>
+      </Labeled>
     </Section>
   );
 }

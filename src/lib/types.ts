@@ -270,6 +270,8 @@ export interface Settings {
   notifyWarnings: boolean;
   backgroundCheckMinutes: number;
   monitoringPaused: boolean;
+  /** Archive folder; null = "archives" in the app data folder. */
+  archiveDir: string | null;
 }
 
 // --- store ---------------------------------------------------------------
@@ -291,11 +293,32 @@ export interface LogQuery {
   namespace?: string | null;
   pod?: string | null;
   container?: string | null;
+  /** Pods of this workload, including gone ones. Needs `namespace`. */
+  workload?: WorkloadRef | null;
   levels?: LogLevel[];
   sinceMs?: number | null;
   untilMs?: number | null;
   beforeId?: number | null;
   limit?: number | null;
+}
+
+export interface WorkloadRef {
+  kind: string;
+  name: string;
+}
+
+/** A pod with stored log lines, alive or gone. */
+export interface LogSource {
+  namespace: string;
+  pod: string;
+  /** Recorded controller; null for pods seen before owners were recorded. */
+  ownerKind: string | null;
+  ownerName: string | null;
+  lines: number;
+  errors: number;
+  warnings: number;
+  firstMs: number;
+  lastMs: number;
 }
 
 export interface Sample {
@@ -449,4 +472,48 @@ export interface ForwardInfo {
   totalConnections: number;
   lastError: string | null;
   startedMs: number;
+}
+
+// --- archives ------------------------------------------------------------------
+
+export interface ArchivedObject extends ObjectRef {
+  /** Removed from the cluster when archived. */
+  removed: boolean;
+  error: string | null;
+}
+
+/** archive.json in an archive folder. */
+export interface ArchiveMeta {
+  /** Folder path under the archive root. */
+  id: string;
+  format: number;
+  kind: string;
+  namespace: string;
+  name: string;
+  clusterId: string;
+  /** Profile it came from (Restore's default target). */
+  profileId: string;
+  connectionName: string;
+  archivedMs: number;
+  replicas: number | null;
+  images: string[];
+  objects: ArchivedObject[];
+  logLines: number;
+  restoredMs: number | null;
+  restoredTo: string | null;
+}
+
+export interface ArchivePlanItem extends RelatedRef {
+  /** Other workloads/Services that still use it; removing it would break them. */
+  usedBy: string[];
+}
+
+export interface RemoveResult extends ObjectRef {
+  outcome: "removed" | "already gone" | "error";
+  message: string | null;
+}
+
+export interface ArchiveOutcome {
+  archive: ArchiveMeta;
+  results: RemoveResult[];
 }

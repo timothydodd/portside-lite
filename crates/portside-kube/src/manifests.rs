@@ -148,7 +148,7 @@ pub async fn apply_edit(
 
 /// Every object in the namespace as JSON, or empty if the kind isn't served
 /// or listing is forbidden.
-async fn list_values(client: &Client, kind: &str, namespace: &str) -> Vec<Value> {
+pub(crate) async fn list_values(client: &Client, kind: &str, namespace: &str) -> Vec<Value> {
     let Ok((api, ar)) = api_for_kind(client, kind, Some(namespace)).await else { return Vec::new() };
     let Ok(list) = api.list(&ListParams::default()).await else { return Vec::new() };
     list.items.into_iter().filter_map(|o| to_value(o, &ar).ok()).collect()

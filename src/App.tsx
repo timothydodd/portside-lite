@@ -6,6 +6,9 @@ import { DeleteDialog, ScaleDialog, Toasts } from "./components/Dialogs";
 import ErrorBoundary from "./components/ErrorBoundary";
 import PodDrawer from "./components/PodDrawer";
 import NodeDrawer from "./components/NodeDrawer";
+import WorkloadDrawer from "./components/WorkloadDrawer";
+import ArchiveDialog from "./components/ArchiveDialog";
+import RestoreDialog from "./components/RestoreDialog";
 import ManifestEditor from "./components/ManifestEditor";
 import CopyDialog from "./components/CopyDialog";
 import ImportDialog from "./components/ImportDialog";
@@ -46,7 +49,10 @@ function PausedBanner() {
 export default function App() {
   const init = useClusterStore((s) => s.init);
   const settings = useClusterStore((s) => s.settings);
-  const { page, go, pod, node, editor, copy, exporting, config, closePod, closeNode, closeEditor, closeCopy, closeExport, closeConfig } = useNavStore();
+  const {
+    page, go, pod, node, workload, editor, copy, exporting, config, archiving, restoring,
+    closePod, closeNode, closeWorkload, closeEditor, closeCopy, closeExport, closeConfig, closeArchive, closeRestore,
+  } = useNavStore();
 
   useEffect(() => {
     void init();
@@ -90,6 +96,11 @@ export default function App() {
           <NodeDrawer />
         </ErrorBoundary>
       )}
+      {workload && (
+        <ErrorBoundary resetKey={`${workload.kind}/${workload.namespace}/${workload.name}/${workload.tab}`} onReset={closeWorkload} className="fixed inset-y-0 right-0 z-40 w-[min(920px,92vw)] border-l border-border bg-surface shadow-[var(--shadow-md)]">
+          <WorkloadDrawer />
+        </ErrorBoundary>
+      )}
       {editor && (
         <ErrorBoundary resetKey={`${editor.kind}/${editor.namespace}/${editor.name}`} onReset={closeEditor} className="fixed inset-y-0 right-0 z-40 w-[min(920px,92vw)] border-l border-border bg-surface shadow-[var(--shadow-md)]">
           <ManifestEditor />
@@ -108,6 +119,16 @@ export default function App() {
       {copy && (
         <ErrorBoundary resetKey={`${copy.kind}/${copy.namespace}/${copy.name}`} onReset={closeCopy} className="fixed left-1/2 top-1/2 z-50 w-[min(640px,94vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface shadow-[var(--shadow-md)]">
           <CopyDialog />
+        </ErrorBoundary>
+      )}
+      {archiving && (
+        <ErrorBoundary resetKey={`archive/${archiving.kind}/${archiving.namespace}/${archiving.name}`} onReset={closeArchive} className="fixed left-1/2 top-1/2 z-50 w-[min(640px,94vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface shadow-[var(--shadow-md)]">
+          <ArchiveDialog />
+        </ErrorBoundary>
+      )}
+      {restoring && (
+        <ErrorBoundary resetKey={`restore/${restoring.id}`} onReset={closeRestore} className="fixed left-1/2 top-1/2 z-50 w-[min(640px,94vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border bg-surface shadow-[var(--shadow-md)]">
+          <RestoreDialog />
         </ErrorBoundary>
       )}
       <ErrorBoundary resetKey="forward">
