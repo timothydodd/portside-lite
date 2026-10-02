@@ -4,6 +4,7 @@
 
 pub mod alerts;
 pub mod archive;
+pub mod files;
 pub mod issues;
 pub mod logline;
 pub mod manifest;

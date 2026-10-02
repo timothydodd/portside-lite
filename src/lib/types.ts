@@ -101,6 +101,8 @@ export interface WorkloadInfo {
   createdMs: number | null;
   schedule: string | null;
   lastScheduleMs: number | null;
+  /** PersistentVolumeClaims its pods mount. */
+  claims: string[];
 }
 
 export interface VolumeClaimInfo {
@@ -111,6 +113,13 @@ export interface VolumeClaimInfo {
   capacity: string | null;
   volumeName: string | null;
   createdMs: number | null;
+  accessModes: string[];
+  /** Running or pending pods that mount it. */
+  mountedBy: string[];
+  /** Workloads whose pods mount it, e.g. "Deployment/web". */
+  usedBy: string[];
+  /** Why files can't be written right now; empty = writable. */
+  writeBlockers: string[];
 }
 
 export interface ServicePort {
@@ -272,6 +281,8 @@ export interface Settings {
   monitoringPaused: boolean;
   /** Archive folder; null = "archives" in the app data folder. */
   archiveDir: string | null;
+  /** Image for the pod that mounts a volume for the file browser. */
+  filesHelperImage: string;
 }
 
 // --- store ---------------------------------------------------------------
@@ -516,4 +527,55 @@ export interface RemoveResult extends ObjectRef {
 export interface ArchiveOutcome {
   archive: ArchiveMeta;
   results: RemoveResult[];
+}
+
+// --- volume files ----------------------------------------------------------------
+
+/** A file browser session: one helper pod mounting one claim. */
+export interface FileSession {
+  id: number;
+  profileId: string;
+  namespace: string;
+  claim: string;
+  pod: string;
+  writable: boolean;
+  /** Why it's read-only, when `writable` is false. */
+  blockers: string[];
+  mountedBy: string[];
+  startedMs: number;
+  expiresMs: number;
+}
+
+export interface FileEntry {
+  name: string;
+  kind: "file" | "dir" | "link" | "other";
+  size: number;
+  modifiedMs: number | null;
+  linkToDir: boolean;
+}
+
+export interface FileListing {
+  path: string;
+  entries: FileEntry[];
+  totalBytes: number | null;
+  freeBytes: number | null;
+}
+
+export interface FileProgress {
+  transferId: string;
+  label: string;
+  done: number;
+  total: number | null;
+}
+
+export interface UploadSummary {
+  files: number;
+  folders: number;
+  bytes: number;
+}
+
+export interface LocalPathInfo {
+  path: string;
+  name: string;
+  dir: boolean;
 }

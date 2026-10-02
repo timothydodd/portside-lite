@@ -156,6 +156,9 @@ pub struct WorkloadInfo {
     /// CronJobs only.
     pub schedule: Option<String>,
     pub last_schedule_ms: Option<i64>,
+    /// PersistentVolumeClaims its pods mount (StatefulSet template claims
+    /// included), for the Files tab.
+    pub claims: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -168,6 +171,13 @@ pub struct VolumeClaimInfo {
     pub capacity: Option<String>,
     pub volume_name: Option<String>,
     pub created_ms: Option<i64>,
+    pub access_modes: Vec<String>,
+    /// Running or pending pods that mount it (file-browser helpers excluded).
+    pub mounted_by: Vec<String>,
+    /// Workloads whose pods mount it, e.g. "Deployment/web".
+    pub used_by: Vec<String>,
+    /// Why files can't be written right now; empty = writable.
+    pub write_blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

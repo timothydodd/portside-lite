@@ -12,11 +12,13 @@ import { toast } from "../stores/toast";
 import IssueCard from "./IssueCard";
 import { Manifest, ObjectEvents } from "./PodDrawer";
 import StoredLogs from "./StoredLogs";
+import { FileBrowser } from "./FileBrowser";
 import { Drawer, EmptyState, Spinner, StatusPill } from "./ui";
 
 const TABS: { id: WorkloadTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "logs", label: "Stored logs" },
+  { id: "files", label: "Files" },
   { id: "events", label: "Events" },
   { id: "yaml", label: "YAML" },
 ];
@@ -99,7 +101,7 @@ export default function WorkloadDrawer() {
     >
       <div className="flex h-full flex-col">
         <div className="flex shrink-0 gap-1 border-b border-border-light px-4">
-          {TABS.map((t) => (
+          {TABS.filter((t) => t.id !== "files" || (w?.claims.length ?? 0) > 0).map((t) => (
             <button key={t.id} className={`navtab ${target.tab === t.id ? "navtab-active" : ""}`} onClick={() => setTab(t.id)}>
               {t.label}
               {t.id === "logs" && sources && sources.length > 0 && (
@@ -119,6 +121,12 @@ export default function WorkloadDrawer() {
               <EmptyState title="Stored on another cluster">
                 Switch to {archive?.connectionName ?? "that cluster"} to search these logs, or open logs.txt in the archive folder.
               </EmptyState>
+            ))}
+          {target.tab === "files" &&
+            (w && w.claims.length > 0 ? (
+              <WorkloadFiles namespace={w.namespace} claims={w.claims} />
+            ) : (
+              <EmptyState title="No volumes">It doesn't mount any PersistentVolumeClaims.</EmptyState>
             ))}
           {target.tab === "events" && <ObjectEvents kind={target.kind} namespace={target.namespace} name={target.name} />}
           {target.tab === "yaml" &&
@@ -338,6 +346,29 @@ export function ArchiveBanner({ archive }: { archive: ArchiveMeta }) {
         {archive.objects.length} object{archive.objects.length === 1 ? "" : "s"} saved, {removed} removed from the cluster
         {archive.logLines > 0 && ` · ${fmtCount(archive.logLines)} log lines in logs.txt`}.
       </p>
+    </div>
+  );
+}
+
+/** The file browser for one of the workload's claims. */
+function WorkloadFiles({ namespace, claims }: { namespace: string; claims: string[] }) {
+  const [claim, setClaim] = useState(claims[0]);
+  const current = claims.includes(claim) ? claim : claims[0];
+  return (
+    <div className="flex h-full flex-col">
+      {claims.length > 1 && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border-light px-4 py-2 text-xs text-content-secondary">
+          Volume
+          <select className="field" value={current} onChange={(e) => setClaim(e.target.value)}>
+            {claims.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        <FileBrowser namespace={namespace} claim={current} />
+      </div>
     </div>
   );
 }

@@ -49,6 +49,11 @@ Tauri 2 + Rust backend, React + TypeScript frontend.
   it from the cluster. Anything another workload still uses is flagged and left in place. Archived
   workloads get their own tab under Workloads, where Restore deploys one again (to its own cluster
   or any other) with a dry run first. The folder is plain YAML, so `kubectl apply -f` works too.
+- **Browses volume files.** The Storage page lists every PersistentVolumeClaim and what uses it.
+  Browse any of them (or a workload's Files tab) to download files, or whole folders as `.tar.gz`,
+  through a short-lived helper pod. Uploading, renaming, deleting and new folders are allowed only
+  while nothing else uses the volume: no other pod mounts it and the workloads that do are scaled
+  to 0. The check runs again before every write.
 - **Pulls logs locally.** Container logs are pulled incrementally into SQLite
   with full-text search. When a container restarts, the crashed instance's
   tail is captured as well. You get a log explorer with a clickable volume

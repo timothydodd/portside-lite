@@ -8,6 +8,7 @@ export type Page =
   | "workloads"
   | "services"
   | "config"
+  | "storage"
   | "nodes"
   | "events"
   | "logs"
@@ -15,7 +16,7 @@ export type Page =
   | "settings";
 
 export type PodTab = "overview" | "logs" | "previous" | "events" | "yaml";
-export type WorkloadTab = "overview" | "logs" | "events" | "yaml";
+export type WorkloadTab = "overview" | "logs" | "files" | "events" | "yaml";
 
 export interface LogPreset {
   namespace?: string;
@@ -50,6 +51,8 @@ interface NavState {
   config: ManifestTarget | null;
   /** Start-port-forward dialog for a Service. */
   forward: { namespace: string; service: string } | null;
+  /** Volume file browser drawer for a PersistentVolumeClaim. */
+  files: { namespace: string; claim: string } | null;
   go: (page: Page) => void;
   openLogs: (preset: LogPreset) => void;
   consumeLogPreset: () => LogPreset | null;
@@ -74,6 +77,8 @@ interface NavState {
   closeConfig: () => void;
   openForward: (namespace: string, service: string) => void;
   closeForward: () => void;
+  openFiles: (namespace: string, claim: string) => void;
+  closeFiles: () => void;
 }
 
 export const useNavStore = create<NavState>((set, get) => ({
@@ -89,32 +94,35 @@ export const useNavStore = create<NavState>((set, get) => ({
   exporting: null,
   config: null,
   forward: null,
+  files: null,
   go: (page) => set({ page }),
-  openLogs: (preset) => set({ page: "logs", logPreset: preset, pod: null, node: null, workload: null }),
+  openLogs: (preset) => set({ page: "logs", logPreset: preset, pod: null, node: null, workload: null, files: null }),
   consumeLogPreset: () => {
     const p = get().logPreset;
     if (p) set({ logPreset: null });
     return p;
   },
-  openPod: (namespace, name, tab = "overview") => set({ pod: { namespace, name, tab }, node: null, workload: null }),
+  openPod: (namespace, name, tab = "overview") => set({ pod: { namespace, name, tab }, node: null, workload: null, files: null }),
   closePod: () => set({ pod: null }),
-  openNode: (name) => set({ node: name, pod: null, workload: null }),
+  openNode: (name) => set({ node: name, pod: null, workload: null, files: null }),
   closeNode: () => set({ node: null }),
   openWorkload: (t, tab = "overview") =>
-    set({ workload: { kind: t.kind, namespace: t.namespace, name: t.name, archiveId: t.archiveId, tab }, pod: null, node: null }),
+    set({ workload: { kind: t.kind, namespace: t.namespace, name: t.name, archiveId: t.archiveId, tab }, pod: null, node: null, files: null }),
   closeWorkload: () => set({ workload: null }),
   openArchive: (t) => set({ archiving: t }),
   closeArchive: () => set({ archiving: null }),
   openRestore: (a) => set({ restoring: a }),
   closeRestore: () => set({ restoring: null }),
-  openEditor: (t) => set({ editor: t, pod: null, node: null, workload: null }),
+  openEditor: (t) => set({ editor: t, pod: null, node: null, workload: null, files: null }),
   closeEditor: () => set({ editor: null }),
   openCopy: (t) => set({ copy: t }),
   closeCopy: () => set({ copy: null }),
   openExport: (t) => set({ exporting: t }),
   closeExport: () => set({ exporting: null }),
-  openConfig: (t) => set({ config: t, pod: null, node: null, editor: null, workload: null }),
+  openConfig: (t) => set({ config: t, pod: null, node: null, editor: null, workload: null, files: null }),
   closeConfig: () => set({ config: null }),
   openForward: (namespace, service) => set({ forward: { namespace, service } }),
   closeForward: () => set({ forward: null }),
+  openFiles: (namespace, claim) => set({ files: { namespace, claim }, pod: null, node: null, workload: null }),
+  closeFiles: () => set({ files: null }),
 }));

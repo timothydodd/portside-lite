@@ -66,6 +66,7 @@ export default function SettingsPage() {
         <BackgroundSection draft={draft} set={set} />
         <DataSection />
         <ArchivesSection draft={draft} set={set} saved={saved} />
+        <VolumeFilesSection draft={draft} set={set} />
         <AppearanceSection />
       </div>
     </div>
@@ -634,6 +635,27 @@ function ArchivesSection({ draft, set, saved }: { draft: Settings; set: (p: Part
             Open
           </button>
         </div>
+      </Labeled>
+    </Section>
+  );
+}
+
+function VolumeFilesSection({ draft, set }: { draft: Settings; set: (p: Partial<Settings>) => void }) {
+  return (
+    <Section
+      title="Volume files"
+      description="Browsing a volume (Storage, or a workload's Files tab) starts a small pod that mounts it, and removes it when you're done."
+    >
+      <Labeled
+        label="Helper image"
+        hint="Needs sh, stat, head, tar and gzip. Point it at a mirror if the cluster can't reach Docker Hub."
+      >
+        <input
+          className="field w-full"
+          value={draft.filesHelperImage}
+          placeholder="busybox:1.37"
+          onChange={(e) => set({ filesHelperImage: e.target.value })}
+        />
       </Labeled>
     </Section>
   );

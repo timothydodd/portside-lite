@@ -52,6 +52,9 @@ impl EventSink for TauriSink {
     fn forwards_changed(&self, forwards: &[portside_monitor::forwards::ForwardInfo]) {
         let _ = self.0.emit("forwards:changed", forwards);
     }
+    fn file_progress(&self, progress: &portside_monitor::files::FileProgress) {
+        let _ = self.0.emit("files:progress", progress);
+    }
 }
 
 pub struct AppState {
@@ -213,7 +216,25 @@ pub fn run() {
             commands::restore_archive,
             commands::delete_archive,
             commands::open_archive_folder,
+            commands::open_volume_files,
+            commands::refresh_volume_files,
+            commands::close_volume_files,
+            commands::list_volume_files,
+            commands::make_volume_dir,
+            commands::delete_volume_path,
+            commands::rename_volume_path,
+            commands::download_volume_path,
+            commands::upload_volume_files,
+            commands::cancel_transfer,
+            commands::local_path_info,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Don't leave file-browser helper pods running on the cluster.
+            if let tauri::RunEvent::Exit = event {
+                let monitor = Arc::clone(&app.state::<AppState>().monitor);
+                tauri::async_runtime::block_on(monitor.close_all_files());
+            }
+        });
 }

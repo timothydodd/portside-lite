@@ -3,6 +3,7 @@
 //! store. The Tauri layer spawns [`Monitor::run_poll_loop`] and
 //! [`Monitor::run_log_loop`] and forwards [`EventSink`] callbacks to the UI.
 
+pub mod files;
 pub mod forwards;
 
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn tray_status(&self, tooltip: &str);
     /// The set of port-forwards (or their counters) changed.
     fn forwards_changed(&self, forwards: &[forwards::ForwardInfo]);
+    /// Bytes moved so far in a volume file upload or download.
+    fn file_progress(&self, progress: &files::FileProgress);
 }
 
 /// Failed polls of the active cluster before "can't reach" fires (≈45 s at
@@ -98,6 +101,11 @@ pub struct Monitor {
     /// Active Service port-forwards by id.
     forwards: std::sync::Mutex<HashMap<u64, forwards::ForwardEntry>>,
     next_forward: std::sync::atomic::AtomicU64,
+    /// Volume file browser sessions (helper pods) by id.
+    file_sessions: files::Sessions,
+    next_file_session: std::sync::atomic::AtomicU64,
+    /// Cancel switches for running file transfers, by transfer id.
+    transfers: files::Transfers,
 }
 
 fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = T> {
@@ -129,6 +137,9 @@ impl Monitor {
             tray: Default::default(),
             forwards: Default::default(),
             next_forward: std::sync::atomic::AtomicU64::new(1),
+            file_sessions: Default::default(),
+            next_file_session: std::sync::atomic::AtomicU64::new(1),
+            transfers: Default::default(),
         })
     }
 
@@ -168,6 +179,8 @@ impl Monitor {
             (changed, resumed)
         };
         if connection_changed {
+            // File browser helpers belong to the old cluster.
+            self.close_all_files().await;
             *self.client.lock().await = None;
             *self.snapshot.write().unwrap() = None;
             self.set_status(|s| {
@@ -793,6 +806,7 @@ mod tests {
             *self.tooltip.lock().unwrap() = tooltip.to_string();
         }
         fn forwards_changed(&self, _: &[forwards::ForwardInfo]) {}
+        fn file_progress(&self, _: &files::FileProgress) {}
     }
 
     fn monitor() -> (Arc<Monitor>, Arc<FakeSink>) {

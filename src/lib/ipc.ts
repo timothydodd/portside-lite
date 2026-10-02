@@ -5,6 +5,8 @@ import type {
   Connection,
   CopyResult,
   ErrorPattern,
+  FileListing,
+  FileSession,
   ForwardInfo,
   EventInfo,
   HistogramBucket,
@@ -14,6 +16,7 @@ import type {
   ImportResult,
   IssueHistoryEntry,
   LiveLogLine,
+  LocalPathInfo,
   LogQuery,
   LogSource,
   LogRecord,
@@ -26,6 +29,7 @@ import type {
   SourceFile,
   Status,
   StorageStats,
+  UploadSummary,
   WorkloadRef,
 } from "./types";
 
@@ -167,3 +171,21 @@ export const restoreArchive = (id: string, targetConnectionId: string, namespace
   invoke<ImportResult[]>("restore_archive", { id, targetConnectionId, namespaceOverride, dryRun });
 export const deleteArchive = (id: string) => invoke<void>("delete_archive", { id });
 export const openArchiveFolder = (id: string | null) => invoke<void>("open_archive_folder", { id });
+
+// --- volume files ---------------------------------------------------------------
+
+export const openVolumeFiles = (namespace: string, claim: string) =>
+  invoke<FileSession>("open_volume_files", { namespace, claim });
+export const refreshVolumeFiles = (id: number) => invoke<FileSession>("refresh_volume_files", { id });
+export const closeVolumeFiles = (id: number) => invoke<void>("close_volume_files", { id });
+export const listVolumeFiles = (id: number, path: string) => invoke<FileListing>("list_volume_files", { id, path });
+export const makeVolumeDir = (id: number, dir: string, name: string) => invoke<void>("make_volume_dir", { id, dir, name });
+export const deleteVolumePath = (id: number, path: string) => invoke<void>("delete_volume_path", { id, path });
+export const renameVolumePath = (id: number, path: string, newName: string) =>
+  invoke<void>("rename_volume_path", { id, path, newName });
+export const downloadVolumePath = (id: number, path: string, folder: boolean, dest: string, transferId: string) =>
+  invoke<number>("download_volume_path", { id, path, folder, dest, transferId });
+export const uploadVolumeFiles = (id: number, dir: string, sources: string[], transferId: string) =>
+  invoke<UploadSummary>("upload_volume_files", { id, dir, sources, transferId });
+export const cancelTransfer = (transferId: string) => invoke<void>("cancel_transfer", { transferId });
+export const localPathInfo = (paths: string[]) => invoke<LocalPathInfo[]>("local_path_info", { paths });

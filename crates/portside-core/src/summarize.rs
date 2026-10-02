@@ -81,14 +81,22 @@ pub fn build_snapshot(
         })
         .collect();
 
-    let mut workloads = Vec::new();
+    let mut workloads: Vec<WorkloadInfo> = Vec::new();
     workloads.extend(objs.deployments.iter().map(deployment_info));
     workloads.extend(objs.statefulsets.iter().map(statefulset_info));
     workloads.extend(objs.daemonsets.iter().map(daemonset_info));
     workloads.extend(objs.jobs.iter().map(job_info));
     workloads.extend(objs.cronjobs.iter().map(cronjob_info));
 
-    let volumes: Vec<VolumeClaimInfo> = objs.pvcs.iter().map(pvc_info).collect();
+    let volumes: Vec<VolumeClaimInfo> = objs.pvcs.iter().map(|p| pvc_info(p, objs)).collect();
+    for v in &volumes {
+        for user in &v.used_by {
+            let Some((kind, name)) = user.split_once('/') else { continue };
+            if let Some(w) = workloads.iter_mut().find(|w| w.kind == kind && w.name == name && w.namespace == v.namespace) {
+                w.claims.push(v.name.clone());
+            }
+        }
+    }
     let services = services_info(objs);
     let configs = configs_info(objs);
 
@@ -557,11 +565,14 @@ fn cronjob_info(c: &CronJob) -> WorkloadInfo {
     }
 }
 
-fn pvc_info(p: &PersistentVolumeClaim) -> VolumeClaimInfo {
+fn pvc_info(p: &PersistentVolumeClaim, objs: &ClusterObjects) -> VolumeClaimInfo {
     let st = p.status.clone().unwrap_or_default();
+    let ns = ns_of(&p.metadata);
+    let name = name_of(&p.metadata);
+    let users = crate::files::claim_users(&ns, &name, objs);
     VolumeClaimInfo {
-        namespace: ns_of(&p.metadata),
-        name: name_of(&p.metadata),
+        namespace: ns.clone(),
+        name: name.clone(),
         phase: st.phase.unwrap_or_else(|| "Unknown".into()),
         storage_class: p.spec.as_ref().and_then(|s| s.storage_class_name.clone()),
         capacity: st
@@ -571,6 +582,10 @@ fn pvc_info(p: &PersistentVolumeClaim) -> VolumeClaimInfo {
             .map(|q| q.0.clone()),
         volume_name: p.spec.as_ref().and_then(|s| s.volume_name.clone()),
         created_ms: ms(&p.metadata.creation_timestamp),
+        access_modes: p.spec.as_ref().and_then(|s| s.access_modes.clone()).unwrap_or_default(),
+        mounted_by: users.pods.into_iter().map(|(pod, _)| pod).collect(),
+        used_by: users.workloads,
+        write_blockers: users.blockers,
     }
 }
 

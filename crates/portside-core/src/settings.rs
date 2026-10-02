@@ -143,7 +143,12 @@ pub struct Settings {
     /// Where workload archives are kept; `None` = `archives` in the app's
     /// data folder.
     pub archive_dir: Option<String>,
+    /// Image for the pod that mounts a volume for the file browser. Needs
+    /// `sh`, `stat`, `head`, `tar` and `gzip` (busybox has them all).
+    pub files_helper_image: String,
 }
+
+pub const DEFAULT_FILES_HELPER_IMAGE: &str = "busybox:1.37";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -167,6 +172,7 @@ impl Default for Settings {
             background_check_minutes: 15,
             monitoring_paused: false,
             archive_dir: None,
+            files_helper_image: DEFAULT_FILES_HELPER_IMAGE.into(),
         }
     }
 }
@@ -199,6 +205,9 @@ impl Settings {
             .is_some_and(|id| self.connections.iter().any(|p| p.id == id));
         if !valid {
             self.active_connection_id = self.connections.first().map(|p| p.id.clone());
+        }
+        if self.files_helper_image.trim().is_empty() {
+            self.files_helper_image = DEFAULT_FILES_HELPER_IMAGE.into();
         }
     }
 }

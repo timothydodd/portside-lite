@@ -249,13 +249,16 @@ const snapshot: ClusterSnapshot = {
   nodes,
   pods,
   workloads: [
-    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null },
-    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null },
-    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null },
-    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null },
-    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H },
+    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, claims: [] },
+    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, claims: [] },
+    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null, claims: ["data-postgres-0"] },
+    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null, claims: ["legacy-uploads"] },
+    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H, claims: [] },
   ],
-  volumes: [],
+  volumes: [
+    { namespace: "data", name: "data-postgres-0", phase: "Bound", storageClass: "local-path", capacity: "20Gi", volumeName: "pvc-1f2e", createdMs: now - 30 * 86_400_000, accessModes: ["ReadWriteOnce"], mountedBy: ["postgres-0"], usedBy: ["StatefulSet/postgres"], writeBlockers: ["Pod postgres-0 has it mounted (Pending).", "StatefulSet postgres is at 1 replica. Scale it to 0."] },
+    { namespace: "apps", name: "legacy-uploads", phase: "Bound", storageClass: "local-path", capacity: "5Gi", volumeName: "pvc-9a8b", createdMs: now - 90 * 86_400_000, accessModes: ["ReadWriteOnce"], mountedBy: [], usedBy: ["Deployment/legacy-api"], writeBlockers: [] },
+  ],
   services: [
     { namespace: "apps", name: "web-frontend", type: "LoadBalancer", clusterIp: "10.43.12.7", external: ["192.168.1.240"], ports: [{ name: "http", port: 80, targetPort: "8080", nodePort: 31080, protocol: "TCP" }], selector: { app: "web-frontend" }, podsMatched: 2, podsReady: 2, podNames: ["web-frontend-5c8d7f9b4-abcde", "web-frontend-5c8d7f9b4-fghij"], routes: ["shop.lan/ (web)"], createdMs: now - 30 * 86_400_000 },
     { namespace: "apps", name: "billing-api", type: "ClusterIP", clusterIp: "10.43.40.2", external: [], ports: [{ name: null, port: 8080, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "billing-api" }, podsMatched: 2, podsReady: 1, podNames: ["billing-api-7d9f8b6c5-x2k4p", "billing-api-7d9f8b6c5-q9z1m"], routes: ["shop.lan/api (web)"], createdMs: now - 30 * 86_400_000 },
@@ -306,6 +309,7 @@ let settings: Settings = {
   backgroundCheckMinutes: 15,
   monitoringPaused: false,
   archiveDir: null,
+  filesHelperImage: "busybox:1.37",
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -514,6 +518,37 @@ const handlers: Record<string, (a: Args) => unknown> = {
     ];
     return all.filter((s) => (!a.namespace || s.namespace === a.namespace) && (!w || (s.ownerKind === w.kind && s.ownerName === w.name)));
   },
+  open_volume_files: (a) => ({ ...mockFileSession(a.namespace as string, a.claim as string) }),
+  refresh_volume_files: (a) => mockFileSessions.get(a.id as number),
+  close_volume_files: () => null,
+  list_volume_files: (a) => {
+    const path = a.path as string;
+    const entries = mockFiles[path];
+    if (!entries) throw `"${path}" isn't a folder (or no longer exists).`;
+    return { path, entries, totalBytes: 5 * GiB, freeBytes: 3.2 * GiB };
+  },
+  make_volume_dir: (a) => {
+    (mockFiles[a.dir as string] ??= []).unshift({ name: a.name as string, kind: "dir", size: 4096, modifiedMs: Date.now(), linkToDir: false });
+    mockFiles[a.dir ? `${a.dir}/${a.name}` : (a.name as string)] = [];
+    return null;
+  },
+  delete_volume_path: (a) => {
+    const path = a.path as string;
+    const i = path.lastIndexOf("/");
+    const [dir, name] = i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
+    mockFiles[dir] = (mockFiles[dir] ?? []).filter((e) => e.name !== name);
+    return null;
+  },
+  rename_volume_path: () => null,
+  download_volume_path: async (a) => {
+    for (let done = 0; done <= 4; done++) {
+      emitMock("files:progress", { transferId: a.transferId, label: a.path, done: done * 2 * 1024 ** 2, total: 8 * 1024 ** 2 });
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return 8 * 1024 ** 2;
+  },
+  upload_volume_files: () => ({ files: 2, folders: 0, bytes: 3_400_000 }),
+  local_path_info: (a) => (a.paths as string[]).map((p) => ({ path: p, name: p.split(/[\\/]/).pop()!, dir: false })),
   archive_root: () => "C:\\Users\\demo\\AppData\\Roaming\\portside-lite\\archives",
   archive_plan: (a) => [
     { kind: "ConfigMap", name: `${a.name}-config`, reason: "used by its pods", exists: true, sensitive: false, defaultSelected: true, usedBy: [] },
@@ -580,6 +615,32 @@ function mockParse(sources: { name: string; content: string }[]) {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mockForwards: any[] = [];
+
+const mockFileSessions = new Map<number, object>();
+function mockFileSession(namespace: string, claim: string) {
+  const v = snapshot.volumes.find((x) => x.namespace === namespace && x.name === claim);
+  const id = mockFileSessions.size + 1;
+  const s = {
+    id, profileId: "homelab", namespace, claim, pod: "portside-files-x7k2p", writable: !v?.writeBlockers.length,
+    blockers: v?.writeBlockers ?? [], mountedBy: v?.mountedBy ?? [], startedMs: Date.now(), expiresMs: Date.now() + 2 * H,
+  };
+  mockFileSessions.set(id, s);
+  return s;
+}
+const mockFiles: Record<string, { name: string; kind: string; size: number; modifiedMs: number; linkToDir: boolean }[]> = {
+  "": [
+    { name: "uploads", kind: "dir", size: 4096, modifiedMs: now - 2 * H, linkToDir: false },
+    { name: "current", kind: "link", size: 7, modifiedMs: now - 3 * H, linkToDir: true },
+    { name: "config.yaml", kind: "file", size: 1830, modifiedMs: now - 26 * H, linkToDir: false },
+    { name: "app.db", kind: "file", size: 412 * 1024 ** 2, modifiedMs: now - 5 * 60_000, linkToDir: false },
+  ],
+  uploads: [
+    { name: "2026", kind: "dir", size: 4096, modifiedMs: now - 2 * H, linkToDir: false },
+    { name: "logo.png", kind: "file", size: 48_211, modifiedMs: now - 40 * 86_400_000, linkToDir: false },
+  ],
+  "uploads/2026": [],
+  current: [{ name: "README.md", kind: "file", size: 912, modifiedMs: now - 3 * H, linkToDir: false }],
+};
 /** Minimal event bus so mock commands can push events like the backend does. */
 const mockListeners = new Map<string, number[]>();
 const mockCallbacks = new Map<number, (e: unknown) => void>();

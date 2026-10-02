@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod archive;
 pub mod config;
+pub mod files;
 pub mod collect;
 pub mod logs;
 pub mod manifests;

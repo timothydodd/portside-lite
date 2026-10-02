@@ -779,3 +779,97 @@ pub fn open_archive_folder(state: State<'_, AppState>, id: Option<String>) -> Cm
     };
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
 }
+
+// --- volume files ----------------------------------------------------------------
+
+#[tauri::command]
+pub async fn open_volume_files(
+    state: State<'_, AppState>,
+    namespace: String,
+    claim: String,
+) -> CmdResult<portside_monitor::files::FileSession> {
+    state.monitor.open_files(&namespace, &claim).await
+}
+
+#[tauri::command]
+pub async fn refresh_volume_files(state: State<'_, AppState>, id: u64) -> CmdResult<portside_monitor::files::FileSession> {
+    state.monitor.refresh_files(id).await
+}
+
+#[tauri::command]
+pub async fn close_volume_files(state: State<'_, AppState>, id: u64) -> CmdResult<()> {
+    state.monitor.close_files(id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_volume_files(state: State<'_, AppState>, id: u64, path: String) -> CmdResult<portside_core::files::FileListing> {
+    state.monitor.list_files(id, &path).await
+}
+
+#[tauri::command]
+pub async fn make_volume_dir(state: State<'_, AppState>, id: u64, dir: String, name: String) -> CmdResult<()> {
+    state.monitor.make_dir(id, &dir, &name).await
+}
+
+#[tauri::command]
+pub async fn delete_volume_path(state: State<'_, AppState>, id: u64, path: String) -> CmdResult<()> {
+    state.monitor.delete_path(id, &path).await
+}
+
+#[tauri::command]
+pub async fn rename_volume_path(state: State<'_, AppState>, id: u64, path: String, new_name: String) -> CmdResult<()> {
+    state.monitor.rename_path(id, &path, &new_name).await
+}
+
+#[tauri::command]
+pub async fn download_volume_path(
+    state: State<'_, AppState>,
+    id: u64,
+    path: String,
+    folder: bool,
+    dest: String,
+    transfer_id: String,
+) -> CmdResult<u64> {
+    state.monitor.download_path(id, &path, folder, &dest, &transfer_id).await
+}
+
+#[tauri::command]
+pub async fn upload_volume_files(
+    state: State<'_, AppState>,
+    id: u64,
+    dir: String,
+    sources: Vec<String>,
+    transfer_id: String,
+) -> CmdResult<portside_monitor::files::UploadSummary> {
+    state.monitor.upload_paths(id, &dir, sources, &transfer_id).await
+}
+
+#[tauri::command]
+pub fn cancel_transfer(state: State<'_, AppState>, transfer_id: String) {
+    state.monitor.cancel_transfer(&transfer_id);
+}
+
+/// Names and kinds of local paths (drag and drop gives bare paths), so the
+/// UI can check for clashes before uploading.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPathInfo {
+    path: String,
+    name: String,
+    dir: bool,
+}
+
+#[tauri::command]
+pub async fn local_path_info(paths: Vec<String>) -> CmdResult<Vec<LocalPathInfo>> {
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let meta = tokio::fs::metadata(&path).await.map_err(|e| format!("{path}: {e}"))?;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        out.push(LocalPathInfo { path, name, dir: meta.is_dir() });
+    }
+    Ok(out)
+}

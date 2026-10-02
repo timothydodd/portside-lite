@@ -17,6 +17,8 @@ import ConfigEditor from "./components/ConfigEditor";
 import { ForwardDialog } from "./components/Forwards";
 import ServicesPage from "./pages/ServicesPage";
 import ConfigPage from "./pages/ConfigPage";
+import StoragePage from "./pages/StoragePage";
+import FilesDrawer from "./components/FileBrowser";
 import OverviewPage from "./pages/OverviewPage";
 import ProblemsPage from "./pages/ProblemsPage";
 import PodsPage from "./pages/PodsPage";
@@ -50,8 +52,8 @@ export default function App() {
   const init = useClusterStore((s) => s.init);
   const settings = useClusterStore((s) => s.settings);
   const {
-    page, go, pod, node, workload, editor, copy, exporting, config, archiving, restoring,
-    closePod, closeNode, closeWorkload, closeEditor, closeCopy, closeExport, closeConfig, closeArchive, closeRestore,
+    page, go, pod, node, workload, editor, copy, exporting, config, archiving, restoring, files,
+    closePod, closeNode, closeWorkload, closeEditor, closeCopy, closeExport, closeConfig, closeArchive, closeRestore, closeFiles,
   } = useNavStore();
 
   useEffect(() => {
@@ -77,6 +79,7 @@ export default function App() {
             {page === "workloads" && <WorkloadsPage />}
             {page === "services" && <ServicesPage />}
             {page === "config" && <ConfigPage />}
+            {page === "storage" && <StoragePage />}
             {page === "nodes" && <NodesPage />}
             {page === "events" && <EventsPage />}
             {page === "logs" && <LogsPage />}
@@ -99,6 +102,11 @@ export default function App() {
       {workload && (
         <ErrorBoundary resetKey={`${workload.kind}/${workload.namespace}/${workload.name}/${workload.tab}`} onReset={closeWorkload} className="fixed inset-y-0 right-0 z-40 w-[min(920px,92vw)] border-l border-border bg-surface shadow-[var(--shadow-md)]">
           <WorkloadDrawer />
+        </ErrorBoundary>
+      )}
+      {files && (
+        <ErrorBoundary resetKey={`files/${files.namespace}/${files.claim}`} onReset={closeFiles} className="fixed inset-y-0 right-0 z-40 w-[min(920px,92vw)] border-l border-border bg-surface shadow-[var(--shadow-md)]">
+          <FilesDrawer />
         </ErrorBoundary>
       )}
       {editor && (
