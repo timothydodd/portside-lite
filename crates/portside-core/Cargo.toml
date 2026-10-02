@@ -2,6 +2,8 @@
 name = "portside-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 k8s-openapi = { version = "0.28.0", features = ["latest"] }

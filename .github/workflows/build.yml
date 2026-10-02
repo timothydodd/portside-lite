@@ -69,6 +69,14 @@ jobs:
       - name: Test
         run: cargo test -p portside-core -p portside-store -p portside-kube -p portside-monitor
 
+      # The committed notices must match the lockfiles; the full license texts ship with releases
+      # (most of these licenses require their text to accompany binaries).
+      - name: Third-party licenses
+        run: |
+          python scripts/third-party-notices.py --check --texts artifacts/licenses/THIRD_PARTY_LICENSES.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md artifacts/licenses/
+
       # Builds the frontend (beforeBuildCommand) and the release executable. The installer is
       # built separately (Inno Setup) so the executable can be signed first.
       - name: Build app
@@ -79,6 +87,13 @@ jobs:
         with:
           name: portside-lite-exe
           path: target/release/portside-lite.exe
+          if-no-files-found: error
+
+      - name: Upload license files
+        uses: actions/upload-artifact@v7
+        with:
+          name: portside-lite-licenses
+          path: artifacts/licenses/
           if-no-files-found: error
 
   # Tag builds and manual runs: signing (tags only) and the installer.
@@ -129,9 +144,14 @@ jobs:
           name: portside-lite-exe
           path: build
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: portside-lite-licenses
+          path: build/licenses
+
       - name: Stage installer files
         shell: pwsh
-        run: ./packaging/Build-Installer.ps1 -Step Stage -Version "${{ env.APP_VERSION }}" -Exe build/portside-lite.exe
+        run: ./packaging/Build-Installer.ps1 -Step Stage -Version "${{ env.APP_VERSION }}" -Exe build/portside-lite.exe -Licenses build/licenses
 
       - name: Azure login (code signing)
         if: env.SIGN == 'true'
@@ -176,7 +196,11 @@ jobs:
 
       - name: Package portable zip
         shell: pwsh
-        run: Compress-Archive -Path artifacts/installer-stage/portside-lite.exe -DestinationPath "artifacts/PortsideLite-${{ env.APP_VERSION }}-win-x64-portable.zip"
+        run: |
+          $stage = "artifacts/installer-stage"
+          Compress-Archive -Path "$stage/portside-lite.exe", "$stage/LICENSE", "$stage/THIRD_PARTY_NOTICES.md", "$stage/THIRD_PARTY_LICENSES.txt" -DestinationPath "artifacts/PortsideLite-${{ env.APP_VERSION }}-win-x64-portable.zip"
+          # Also published on its own, next to the downloads.
+          Copy-Item "$stage/THIRD_PARTY_LICENSES.txt" artifacts/
 
       # After signing, so the published hashes match the files people download.
       - name: Hash the downloads
@@ -206,6 +230,7 @@ jobs:
             artifacts/PortsideLite-Setup-*.exe
             artifacts/PortsideLite-*-portable.zip
             artifacts/SHA256SUMS.txt
+            artifacts/THIRD_PARTY_LICENSES.txt
           if-no-files-found: error
 
   # Installs, runs, upgrades and uninstalls the installer just built on a clean runner.
@@ -257,4 +282,5 @@ jobs:
             artifacts/PortsideLite-Setup-*.exe
             artifacts/PortsideLite-*-portable.zip
             artifacts/SHA256SUMS.txt
+            artifacts/THIRD_PARTY_LICENSES.txt
           generate_release_notes: true

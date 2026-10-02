@@ -42,6 +42,9 @@ Write-Host "Install (per user, autostart task)"
 Check ((Invoke-Setup @('/TASKS="autostart"')) -eq 0) "installer exits 0"
 Check (Test-Path $exe) "executable installed to $installDir"
 Check (Test-Path $shortcut) "Start menu shortcut created"
+foreach ($f in "LICENSE.txt", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.txt") {
+    Check (Test-Path (Join-Path $installDir $f)) "$f installed"
+}
 Check ((Get-RunValue) -like '*portside-lite.exe" --tray') "login item starts it in the tray"
 
 Write-Host "Run"

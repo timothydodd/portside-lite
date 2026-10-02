@@ -4,152 +4,65 @@
 
 # Portside Lite
 
-A desktop app for watching, triaging and fixing a k3s cluster. It's the
-client-side sibling of [Portside](../core/portside): no server, no login.
-Tauri 2 + Rust backend, React + TypeScript frontend.
+A Windows desktop app for watching, triaging and fixing k3s clusters. It runs on your machine, so
+there's no server to host and no login. Built with Tauri 2 (Rust) and React.
 
-## What it does
+## Features
 
-- **Finds problems.** Every poll runs a set of rules and lists what needs
-  attention, worst first, with a plain-language next step:
-  - CrashLoopBackOff, ImagePullBackOff, config errors
-  - OOMKills, unschedulable/stuck Pending pods, not-ready pods, stuck Terminating
-  - NotReady nodes; memory/disk/PID pressure; high CPU/memory
-  - degraded or down Deployments/StatefulSets/DaemonSets; failed Jobs
-  - Pending/Lost PVCs; probe failures, mount failures and evictions from events
-  - error-log spikes per pod
-- **Tracks problem history.** When each problem started and resolved, and which
-  ones keep coming back.
-- **Lets you act.** Restart (delete) a pod; rollout-restart, scale or delete
-  a workload; cordon/uncordon a node; view YAML and events. "Scale to 0"
-  remembers the replica count (an annotation on the object) so Restore brings
-  it back. Delete asks you to type the name and offers a YAML backup first. Destructive actions
-  ask first.
-- **Services and configuration.** Services with live endpoint health (how many pods each selector
-  actually matches, and how many are ready), plus the Ingress routes to each; a Service with no
-  endpoints is flagged as a problem. ConfigMaps and Secrets with key names and the workloads that
-  use each, and a key/value editor (Secret values decoded and masked) that offers to restart
-  dependent workloads after saving.
-- **Port-forwarding.** Forward any Service port to `localhost` (80→8080, 443→8443 by default,
-  or pick one) to test an app or open a site from your machine; it works over SSH too. Unlike
-  `kubectl port-forward`, a forward survives pod restarts and rollouts: each new connection goes to
-  a Ready pod. It listens on 127.0.0.1 only.
-- **Edits, exports and copies workloads.** Edit a workload's YAML in-app, with
-  a dry-run check before applying. Saves work like `kubectl edit`: if the
-  object changed on the cluster meanwhile, the save is refused. Export clean,
-  re-appliable YAML for one workload together with the objects that make it run (its
-  ConfigMaps, Secrets, ServiceAccount, PVCs, the Services selecting its pods, Ingresses routing to
-  those, HPAs — you choose), or a whole kind/namespace, or copy a
-  workload to any saved cluster or namespace, optionally bringing the
-  ConfigMaps and Secrets it references. **Import** applies one or many YAML
-  files, or pasted YAML (multi-document and `kind: List` included), to any
-  saved cluster in dependency order, with a dry-run preview.
-- **Archives workloads.** Archive saves a workload and the objects it needs (config, Secrets,
-  Services, Ingresses, autoscalers, PVC claims) plus its stored logs to a local folder, then removes
-  it from the cluster. Anything another workload still uses is flagged and left in place. Archived
-  workloads get their own tab under Workloads, where Restore deploys one again (to its own cluster
-  or any other) with a dry run first. The folder is plain YAML, so `kubectl apply -f` works too.
-- **Browses volume files.** The Storage page lists every PersistentVolumeClaim and what uses it.
-  Browse any of them (or a workload's Files tab) to download files, or whole folders as `.tar.gz`,
-  through a short-lived helper pod. Uploading, renaming, deleting and new folders are allowed only
-  while nothing else uses the volume: no other pod mounts it and the workloads that do are scaled
-  to 0. The check runs again before every write.
-- **Pulls logs locally.** Container logs are pulled incrementally into SQLite
-  with full-text search. When a container restarts, the crashed instance's
-  tail is captured as well. You get a log explorer with a clickable volume
-  histogram, plus analytics: noisiest pods, recurring error messages (with
-  numbers collapsed so repeats group), restart leaders. Logs stay searchable by workload after its
-  pods are gone (scaled to 0, redeployed, deleted or archived), and every workload has an overview
-  that opens even when nothing is running.
-- **Runs in the background.** Closing the window hides it to the system tray
-  and monitoring continues. You get a desktop notification when any saved
-  cluster has a new critical problem or becomes unreachable, once per
-  problem. The active cluster is watched at the normal poll rate; the others
-  are checked every 15 minutes (configurable). Pause/resume all monitoring
-  from the tray menu (or Settings); quit from the tray menu too.
-- **Records metrics history.** Node and pod CPU/memory from metrics-server,
-  kept for the retention window.
+- **Problems:** crash loops, OOMKills, stuck pods, node pressure, failing workloads and more, each
+  with a plain-language next step and a history of when it started and resolved.
+- **Actions:** restart pods, rollout-restart, scale or delete workloads, cordon nodes.
+- **YAML:** edit with a dry run first, export, copy to another cluster, import.
+- **Services and config:** endpoint health, Ingress routes, ConfigMap and Secret editing, and
+  port-forwards that survive pod restarts.
+- **Storage:** browse files on any PersistentVolumeClaim and download them. You can upload or
+  change files once nothing else is using the volume.
+- **Logs:** pulled into local, full-text-searchable storage, including the output of crashed
+  containers. Still there after the pods are gone.
+- **Archives:** save a workload and what it needs to a folder, remove it, restore it later.
+- **Background mode:** lives in the system tray and notifies you about new critical problems on
+  any saved cluster.
+
+More detail in [docs/features.md](docs/features.md).
 
 ## Install
 
-Download `PortsideLite-Setup-<version>.exe` from
-[Releases](https://github.com/timothydodd/portside-lite/releases). It installs for your user
-account (no admin prompt) and can optionally start Portside Lite in the tray when you sign in.
-There's also a portable zip containing just the executable. Check downloads against
-`SHA256SUMS.txt`. Release builds are code-signed.
+Download `PortsideLite-Setup-<version>.exe` (or the portable zip) from
+[Releases](https://github.com/timothydodd/portside-lite/releases). It installs per user with no admin
+prompt. Release builds are code-signed; check downloads against `SHA256SUMS.txt`.
 
 Needs Windows 10 1809 or later. The installer adds the Microsoft Edge WebView2 runtime if it's
-missing (Windows 11 already has it).
+missing.
 
-## Connecting
+## Connect
 
-Settings → **Cluster connections**. Save as many as you like (any mix of
-local and SSH) and switch between them from the dropdown at the top of the
-sidebar. Only the active cluster is monitored; each keeps its own stored
-logs, metrics and problem history.
+Open **Settings → Cluster connections** and add either:
 
-Each connection is one of:
+- a **local kubeconfig** (any file and context), or
+- **SSH to a k3s server**. Portside reads the cluster credentials over SSH and tunnels the API
+  server through the connection. Nothing is installed on the node.
 
-- **Local kubeconfig.** Uses `$KUBECONFIG` / `~/.kube/config`, or a file you
-  pick, with any context.
-- **SSH to a k3s server.** Portside SSHes in (key or password), runs
-  `sudo -n cat /etc/rancher/k3s/k3s.yaml` to get the cluster credentials, and
-  forwards the API server port through the SSH session. Nothing is installed
-  on the node. The host key is pinned on first connect; if it changes, the
-  connection is blocked.
-  - k3s writes `k3s.yaml` root-only. Either enter a **Sudo password** on the
-    connection, or (better) let your SSH user run just that one command
-    without a password. On the k3s server:
-    ```bash
-    echo "$USER ALL=(root) NOPASSWD: /usr/bin/cat /etc/rancher/k3s/k3s.yaml" \
-      | sudo tee /etc/sudoers.d/portside-lite
-    sudo chmod 440 /etc/sudoers.d/portside-lite && sudo visudo -c
-    ```
+Save as many as you like and switch from the sidebar. Setup details, including passwordless sudo
+for the SSH option, are in [docs/connecting.md](docs/connecting.md).
 
-## Develop
+## Documentation
 
-> Build and run on **Windows**. WSL is for editing and quick checks only (see CLAUDE.md).
+| | |
+| --- | --- |
+| [Features](docs/features.md) | Everything the app does, in detail |
+| [Connecting](docs/connecting.md) | Local kubeconfig and SSH setup |
+| [Data and privacy](docs/data-and-privacy.md) | What's stored locally, and what the app creates on your cluster |
+| [Development](docs/development.md) | Building and running from source |
+| [Releasing](docs/releasing.md) | Release pipeline and code signing (maintainers) |
 
-```powershell
-npm install
-npm run tauri dev
-```
+## License
 
-For UI work, `npm run dev` and a normal browser at http://localhost:1420 use
-a mocked backend with fixture data (`src/dev/mockTauri.ts`, dev only).
+Portside Lite is released under the [MIT License](LICENSE).
 
-## Data
+It's built on open-source components that keep their own licenses: mostly MIT and Apache-2.0,
+plus a few BSD, ISC, Unicode-3.0 and MPL-2.0 ones. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full list with attributions. Every release
+includes the full license texts (`THIRD_PARTY_LICENSES.txt`).
 
-Everything lives in `portside-lite.db` in the app data directory
-(`%APPDATA%\com.portside.lite` on Windows). Settings → **Local data** shows
-the database size and lets you prune or clear it. SSH passwords and key
-passphrases are stored **unencrypted** in that database; prefer key auth.
-
-## Releasing
-
-Push a `vX.Y.Z` tag. The [Build workflow](.github/workflows/build.yml) builds and tests, then
-**waits for approval** in the `release` environment. Nothing is signed or published until a
-reviewer approves the run (Actions → the run → *Review deployments*). After approval it signs the
-executable, builds and signs the Inno Setup installer, smoke-tests install/upgrade/uninstall on a
-clean runner, and publishes the GitHub release with SHA256 sums.
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-Pushes and PRs to `main` build and test only. *Run workflow* on the Actions tab makes an unsigned
-test installer (never published).
-
-### Code signing (one-time setup)
-
-Signing uses Azure Trusted Signing through OIDC, so no certificate or password is stored anywhere.
-It switches on once these exist on the repo (until then releases are unsigned):
-
-- **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
-- **Variables:** `SIGNING_ENDPOINT`, `SIGNING_ACCOUNT`, `SIGNING_PROFILE`
-- **In Azure:** the app registration needs a federated credential for
-  `repo:timothydodd@8201238/portside-lite@1389857470:environment:release` and the *Trusted
-  Signing Certificate Profile Signer* role on the certificate profile. This repo uses GitHub's
-  immutable-ID OIDC subject (`owner@id/repo@id`), not the older `repo:owner/repo` form; check
-  `gh api repos/timothydodd/portside-lite/actions/oidc/customization/sub` for the prefix.
-
+Kubernetes is a registered trademark of The Linux Foundation. Portside Lite isn't affiliated with
+or endorsed by the Kubernetes or k3s projects.

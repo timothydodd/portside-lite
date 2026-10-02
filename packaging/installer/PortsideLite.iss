@@ -2,7 +2,8 @@
 ; which passes the defines below.
 ;
 ;   /DAppVersion=1.2.3   required
-;   /DStageDir=<dir>     required: holds portside-lite.exe and MicrosoftEdgeWebview2Setup.exe
+;   /DStageDir=<dir>     required: holds portside-lite.exe, MicrosoftEdgeWebview2Setup.exe and the
+;                        license files (LICENSE, THIRD_PARTY_NOTICES.md, THIRD_PARTY_LICENSES.txt)
 ;   /DOutputDir=<dir>    required
 ;
 ; Installs per user by default (no UAC prompt; the app needs no elevation). The first page offers
@@ -55,6 +56,9 @@ Name: "autostart"; Description: "&Start Portside Lite in the system tray when I 
 
 [Files]
 Source: "{#StageDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "{#StageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\THIRD_PARTY_LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]

@@ -3,8 +3,8 @@
   Builds the Portside Lite installer: PortsideLite-Setup-<version>.exe (Inno Setup 6).
 
 .DESCRIPTION
-  Stage   copies the release executable (built by `tauri build --no-bundle`) and the Microsoft
-          Edge WebView2 bootstrapper into artifacts\installer-stage
+  Stage   copies the release executable (built by `tauri build --no-bundle`), the license files
+          and the Microsoft Edge WebView2 bootstrapper into artifacts\installer-stage
   Compile compiles packaging\installer\PortsideLite.iss from that stage folder
   All     both (default)
   CI runs the halves separately so the executable can be code-signed between them; the installer
@@ -14,6 +14,9 @@
   Three-part version, the same one the app is built with.
 .PARAMETER Exe
   The built executable (default: target\release\portside-lite.exe, the workspace target dir).
+.PARAMETER Licenses
+  Folder holding LICENSE, THIRD_PARTY_NOTICES.md and THIRD_PARTY_LICENSES.txt. Default: generate
+  them here with scripts\third-party-notices.py (needs Python, cargo and node_modules).
 
 .EXAMPLE
   npm run tauri build -- --no-bundle
@@ -25,6 +28,7 @@ param(
     [string]$Step = "All",
     [string]$Version = "0.1.0",
     [string]$Exe = "",
+    [string]$Licenses = "",
     [string]$Output = "artifacts"
 )
 
@@ -41,6 +45,22 @@ if ($Step -ne "Compile") {
     New-Item $stageDir -ItemType Directory -Force | Out-Null
     Copy-Item $Exe (Join-Path $stageDir "portside-lite.exe")
 
+    # Shipped next to the exe: most third-party licenses require their text to go with binaries.
+    if ($Licenses) {
+        foreach ($f in "LICENSE", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.txt") {
+            $src = Join-Path $Licenses $f
+            if (-not (Test-Path $src)) { throw "Missing $src" }
+            Copy-Item $src $stageDir
+        }
+    } else {
+        Push-Location $root
+        try {
+            python scripts/third-party-notices.py --texts (Join-Path $stageDir "THIRD_PARTY_LICENSES.txt")
+            if ($LASTEXITCODE -ne 0) { throw "Couldn't generate the third-party license texts" }
+        } finally { Pop-Location }
+        Copy-Item (Join-Path $root "LICENSE"), (Join-Path $root "THIRD_PARTY_NOTICES.md") $stageDir
+    }
+
     # Evergreen bootstrapper (~2 MB): the installer runs it only when WebView2 is missing.
     Write-Host "Downloading the WebView2 bootstrapper..."
     $bootstrapper = Join-Path $stageDir "MicrosoftEdgeWebview2Setup.exe"
@@ -50,6 +70,9 @@ if ($Step -ne "Compile") {
         throw "The WebView2 bootstrapper isn't validly signed by Microsoft ($($sig.Status)); refusing to ship it."
     }
     if ($Step -eq "Stage") { return }
+}
+if (-not (Test-Path (Join-Path $stageDir "THIRD_PARTY_LICENSES.txt"))) {
+    throw "No license files staged at $stageDir. Run with -Step Stage (or All) first."
 }
 if (-not (Test-Path (Join-Path $stageDir "portside-lite.exe"))) {
     throw "Nothing staged at $stageDir. Run with -Step Stage (or All) first."

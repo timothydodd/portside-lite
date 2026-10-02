@@ -2,6 +2,8 @@
 name = "portside-lite"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Desktop monitor and triage tool for k3s clusters"
 
 [lib]
