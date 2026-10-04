@@ -8,7 +8,7 @@ import { useArchivesStore } from "../stores/archives";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 import { toast } from "../stores/toast";
-import { EmptyState, Spinner, StatusPill } from "./ui";
+import { ActionMenu, EmptyState, Spinner, StatusPill } from "./ui";
 
 /** Archived workloads, read from the archive folder. */
 export default function ArchiveList({ namespace, search }: { namespace: string; search: string }) {
@@ -73,9 +73,15 @@ export default function ArchiveList({ namespace, search }: { namespace: string; 
       </div>
       {error && <p className="px-6 text-xs text-critical">{error}</p>}
       {rows.length === 0 ? (
-        <EmptyState title="Nothing archived">
-          Use the archive button on a workload (or in its overview) to save it locally and take it off the cluster.
-        </EmptyState>
+        (archives.length > 0 && (namespace || search)) || elsewhere > 0 ? (
+          <EmptyState title="No archives match">
+            {namespace || search ? "Nothing fits the namespace or search filter." : "There are archives from other clusters; tick the box above to see them."}
+          </EmptyState>
+        ) : (
+          <EmptyState title="Nothing archived">
+            Use Archive in a workload's actions menu (or in its overview) to save it locally and take it off the cluster.
+          </EmptyState>
+        )
       ) : (
         <table className="table">
           <thead>
@@ -117,19 +123,18 @@ export default function ArchiveList({ namespace, search }: { namespace: string; 
                     {fmtAgo(a.archivedMs)}
                   </td>
                   <td className="whitespace-nowrap text-right" onClick={(e) => e.stopPropagation()}>
-                    <button className="btn-quiet" title="Restore: deploy it again" onClick={() => openRestore(a)}>
-                      <ArchiveRestore size={14} />
-                    </button>
-                    <button
-                      className="btn-quiet"
-                      title="Open the archive folder"
-                      onClick={() => void ipc.openArchiveFolder(a.id).catch((e) => toast.error(errorMessage(e)))}
-                    >
-                      <FolderOpen size={14} />
-                    </button>
-                    <button className="btn-quiet hover:!text-critical" title="Delete the archive from disk" onClick={() => void remove(a)}>
-                      <Trash2 size={14} />
-                    </button>
+                    <ActionMenu
+                      label={`Actions for ${a.name}`}
+                      items={[
+                        { label: "Restore…", icon: <ArchiveRestore size={14} />, title: "Deploy it again", onSelect: () => openRestore(a) },
+                        {
+                          label: "Open archive folder",
+                          icon: <FolderOpen size={14} />,
+                          onSelect: () => void ipc.openArchiveFolder(a.id).catch((e) => toast.error(errorMessage(e))),
+                        },
+                        { label: "Delete archive…", icon: <Trash2 size={14} />, danger: true, title: "Delete the archive from disk", onSelect: () => void remove(a) },
+                      ]}
+                    />
                   </td>
                 </tr>
               );

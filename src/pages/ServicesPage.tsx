@@ -5,13 +5,14 @@ import { useClusterStore } from "../stores/cluster";
 import { fmtAge } from "../lib/format";
 import type { ServiceInfo, ServicePort } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
-import { NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
+import { EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useNavStore } from "../stores/nav";
 
 /** Endpoint health: what traffic to this Service would actually hit. */
 function endpoints(s: ServiceInfo): { label: string; tone: "good" | "warning" | "critical" | "muted"; rank: number } {
   if (s.type === "ExternalName") return { label: "External", tone: "muted", rank: 3 };
   if (Object.keys(s.selector).length === 0) return { label: "No selector", tone: "muted", rank: 3 };
+  if (s.podsMatched === 0 && s.idle) return { label: "Scaled to 0", tone: "muted", rank: 3 };
   if (s.podsMatched === 0) return { label: "No pods", tone: "critical", rank: 0 };
   if (s.podsReady === 0) return { label: `0/${s.podsMatched} ready`, tone: "critical", rank: 0 };
   if (s.podsReady < s.podsMatched) return { label: `${s.podsReady}/${s.podsMatched} ready`, tone: "warning", rank: 1 };
@@ -165,6 +166,7 @@ function ServicesTable(p: {
             })}
           </tbody>
         </table>
+        {rows.length === 0 && <EmptyState title="No Services match">{p.services.length ? "Nothing fits the namespace and search filter." : "The cluster has no Services."}</EmptyState>}
       </div>
     </div>
   );

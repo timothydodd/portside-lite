@@ -125,7 +125,11 @@ impl Monitor {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let Ok((socket, _)) = accepted else { continue };
+                        let Ok((socket, _)) = accepted else {
+                            // e.g. out of file descriptors: don't spin on it.
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            continue;
+                        };
                         let _ = socket.set_nodelay(true);
                         tokio::spawn(serve_connection(
                             Arc::clone(&monitor), Arc::clone(&info2), Arc::clone(&route),
@@ -138,9 +142,39 @@ impl Monitor {
         });
 
         let snapshot = info.lock().unwrap().clone();
-        self.forwards.lock().unwrap().insert(id, ForwardEntry { info, shutdown });
+        {
+            // Checked again under the lock: two starts for the same port can both pass the check above.
+            let mut forwards = self.forwards.lock().unwrap();
+            let twin = forwards.values().map(|e| e.info.lock().unwrap().clone()).find(|f| {
+                f.profile_id == snapshot.profile_id && f.namespace == namespace && f.service == service && f.service_port == service_port
+            });
+            if let Some(twin) = twin {
+                let _ = shutdown.send(true);
+                return Err(format!("{service}:{service_port} is already forwarded to 127.0.0.1:{}", twin.local_port));
+            }
+            forwards.insert(id, ForwardEntry { info, shutdown });
+        }
         self.emit_forwards();
         Ok(snapshot)
+    }
+
+    /// Stop forwards whose profile was deleted or now points somewhere else:
+    /// their next reconnect would look the Service up on a different cluster.
+    pub(crate) fn stop_orphaned_forwards(&self, old: &portside_core::Settings, new: &portside_core::Settings) {
+        let find = |s: &portside_core::Settings, id: &str| s.connections.iter().find(|p| p.id == id).map(|p| p.connection.clone());
+        let orphaned: Vec<u64> = self
+            .list_forwards()
+            .into_iter()
+            .filter(|f| match (find(old, &f.profile_id), find(new, &f.profile_id)) {
+                (Some(was), Some(is)) => !was.same_endpoint(&is),
+                (_, None) => true,
+                (None, Some(_)) => false,
+            })
+            .map(|f| f.id)
+            .collect();
+        for id in orphaned {
+            self.stop_forward(id);
+        }
     }
 
     /// Close the local port and every open connection of a forward.
@@ -171,7 +205,12 @@ async fn serve_connection(
     }
     monitor.emit_forwards();
 
-    match connect(&monitor, &route, &profile_id, &namespace, &service, service_port).await {
+    // Stopping the forward also gives up on a connection that's still being set up.
+    let connected = tokio::select! {
+        c = connect(&monitor, &route, &profile_id, &namespace, &service, service_port) => c,
+        _ = shutdown.wait_for(|stop| *stop) => Err("Stopped.".to_string()),
+    };
+    match connected {
         Ok((pf, mut stream, target)) => {
             {
                 let mut i = info.lock().unwrap();
@@ -185,7 +224,10 @@ async fn serve_connection(
                 _ = shutdown.changed() => {}
             }
             drop(stream);
-            let _ = tokio::time::timeout(Duration::from_secs(5), pf.join()).await;
+            // The pod-side failure (e.g. nothing listening on the port) arrives here.
+            if let Ok(Err(e)) = tokio::time::timeout(Duration::from_secs(5), pf.join()).await {
+                info.lock().unwrap().last_error = Some(e.to_string());
+            }
         }
         Err(e) => {
             info.lock().unwrap().last_error = Some(e);

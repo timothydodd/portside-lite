@@ -407,7 +407,43 @@ fn workload_issue(rule: &str, severity: Severity, w: &WorkloadInfo, title: Strin
     }
 }
 
-fn detect_workloads(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+/// A pod that's young and coming up without trouble (no restarts, nothing
+/// stuck on an image or config error).
+fn starting_cleanly(p: &PodInfo, now: i64) -> bool {
+    p.created_ms.is_some_and(|c| now - c < STARTUP_GRACE_MS)
+        && p.deleting_since_ms.is_none()
+        && p.containers.iter().all(|c| {
+            c.restarts == 0
+                && (c.state != "waiting" || matches!(c.reason.as_deref(), None | Some("ContainerCreating" | "PodInitializing")))
+                && c.state != "terminated"
+        })
+}
+
+/// Not ready yet for an ordinary reason: it was just created, or its pods
+/// were just replaced (rollout, restart, a deleted pod) and are starting
+/// cleanly. Pods in real trouble raise their own issues straight away.
+fn settling(w: &WorkloadInfo, snap: &ClusterSnapshot, now: i64) -> bool {
+    if w.created_ms.is_some_and(|c| now - c < STARTUP_GRACE_MS) {
+        return true;
+    }
+    let mut pods = snap
+        .pods
+        .iter()
+        .filter(|p| p.namespace == w.namespace && p.owner_kind.as_deref() == Some(w.kind.as_str()) && p.owner_name.as_deref() == Some(w.name.as_str()))
+        .filter(|p| p.ready_containers < p.total_containers || p.total_containers == 0)
+        .peekable();
+    pods.peek().is_some() && pods.all(|p| starting_cleanly(p, now))
+}
+
+/// A failed run of a CronJob that has since had a successful one.
+fn superseded(job: &WorkloadInfo, snap: &ClusterSnapshot) -> bool {
+    let Some((parent, _)) = job.name.rsplit_once('-') else { return false };
+    let sibling = |w: &&WorkloadInfo| w.kind == "Job" && w.namespace == job.namespace && w.name.rsplit_once('-').is_some_and(|(p, _)| p == parent);
+    snap.workloads.iter().any(|w| w.kind == "CronJob" && w.namespace == job.namespace && w.name == parent)
+        && snap.workloads.iter().filter(sibling).any(|w| w.created_ms > job.created_ms && w.condition_message.is_none() && w.ready >= w.desired.max(1))
+}
+
+fn detect_workloads(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     for w in &snap.workloads {
         match w.kind.as_str() {
             "Deployment" | "StatefulSet" | "DaemonSet" => {
@@ -423,6 +459,9 @@ fn detect_workloads(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
                             vec![ActionKind::RolloutRestart],
                         ));
                     }
+                    continue;
+                }
+                if settling(w, snap, now) {
                     continue;
                 }
                 let severity = if w.ready == 0 { Severity::Critical } else { Severity::Warning };
@@ -451,7 +490,7 @@ fn detect_workloads(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
                 ));
             }
             "Job" => {
-                if let Some(msg) = &w.condition_message {
+                if let Some(msg) = w.condition_message.as_ref().filter(|_| !superseded(w, snap)) {
                     out.push(workload_issue(
                         "job-failed",
                         Severity::Warning,
@@ -505,14 +544,14 @@ fn detect_workloads(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
 /// traffic to them fails even though the Service itself looks fine.
 fn detect_services(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
     for s in &snap.services {
-        if s.type_ == "ExternalName" || s.selector.is_empty() {
+        if s.type_ == "ExternalName" || s.selector.is_empty() || s.idle {
             continue;
         }
         let (rule, detail, hint) = if s.pods_matched == 0 {
             (
                 "service-no-pods",
                 "Its selector matches no running pod, so requests have nowhere to go.".to_string(),
-                "Compare the Service's selector with the pod labels. A typo, or the workload is scaled to 0.",
+                "Compare the Service's selector with the pod labels: usually a typo, or the workload behind it is gone.",
             )
         } else if s.pods_ready == 0 {
             (
@@ -543,9 +582,14 @@ fn detect_services(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
 
 fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     // Group by (object, reason) so a flapping probe is one issue, not fifty.
-    let mut groups: HashMap<(String, String, String, String), (i32, &EventInfo)> = HashMap::new();
+    // (count, newest event, earliest first-seen)
+    let mut groups: HashMap<(String, String, String, String), (i32, &EventInfo, Option<i64>)> = HashMap::new();
     for e in &snap.events {
         if e.last_ms.map(|t| now - t > EVENT_WINDOW_MS).unwrap_or(true) {
+            continue;
+        }
+        // A pod that's gone (replaced in a rollout, deleted) can't be fixed or opened.
+        if e.object_kind == "Pod" && !snap.pods.iter().any(|p| p.namespace == e.namespace && p.name == e.object_name) {
             continue;
         }
         if !EVENT_REASONS.iter().any(|(r, _)| *r == e.reason) {
@@ -557,13 +601,17 @@ fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
             e.object_name.clone(),
             e.reason.clone(),
         );
-        let entry = groups.entry(key).or_insert((0, e));
+        let entry = groups.entry(key).or_insert((0, e, e.first_ms));
         entry.0 += e.count;
         if e.last_ms > entry.1.last_ms {
             entry.1 = e;
         }
+        entry.2 = match (entry.2, e.first_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
     }
-    for ((kind, ns, name, reason), (count, e)) in groups {
+    for ((kind, ns, name, reason), (count, e, since)) in groups {
         let hint = EVENT_REASONS.iter().find(|(r, _)| *r == reason).map(|(_, h)| *h);
         let actions = if kind == "Pod" {
             vec![ActionKind::ViewLogs, ActionKind::DeletePod]
@@ -581,7 +629,7 @@ fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
             title: format!("{reason}: {name}"),
             detail: format!("{} ({}× in the last 30 min)", e.message, count),
             hint: hint.map(str::to_string),
-            since_ms: e.first_ms,
+            since_ms: since,
             actions,
             first_seen_ms: None,
         });
@@ -594,7 +642,7 @@ pub fn detect(snap: &ClusterSnapshot, settings: &Settings, now_ms: i64) -> Vec<I
     let mut out = Vec::new();
     detect_nodes(snap, settings, &mut out);
     detect_pods(snap, settings, now_ms, &mut out);
-    detect_workloads(snap, &mut out);
+    detect_workloads(snap, now_ms, &mut out);
     detect_services(snap, &mut out);
     detect_events(snap, now_ms, &mut out);
     sort_dedupe(&mut out);
@@ -750,7 +798,7 @@ mod tests {
             last_ms: Some(NOW - 1000),
             ..Default::default()
         };
-        let snap = ClusterSnapshot { events: vec![ev(3), ev(4)], ..Default::default() };
+        let snap = ClusterSnapshot { pods: vec![pod("api")], events: vec![ev(3), ev(4)], ..Default::default() };
         let issues = detect(&snap, &Settings::default(), NOW);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].detail.contains("7×"));
@@ -773,5 +821,70 @@ mod tests {
         };
         let rules: Vec<String> = detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.rule).collect();
         assert_eq!(rules, vec!["service-no-pods", "service-no-ready-endpoints"]);
+
+        let mut idle = svc("parked", 0, 0);
+        idle.idle = true;
+        let snap = ClusterSnapshot { services: vec![idle], ..Default::default() };
+        assert!(detect(&snap, &Settings::default(), NOW).is_empty(), "scaled to 0 on purpose");
+    }
+
+    fn workload(kind: &str, name: &str, ready: i32, desired: i32) -> WorkloadInfo {
+        WorkloadInfo { kind: kind.into(), namespace: "default".into(), name: name.into(), ready, desired, created_ms: Some(0), ..Default::default() }
+    }
+
+    fn owned(name: &str, owner: &str, age_ms: i64) -> PodInfo {
+        PodInfo {
+            owner_kind: Some("Deployment".into()),
+            owner_name: Some(owner.into()),
+            created_ms: Some(NOW - age_ms),
+            ready_containers: 0,
+            containers: vec![ContainerInfo { name: "app".into(), state: "waiting".into(), reason: Some("ContainerCreating".into()), ..Default::default() }],
+            ..pod(name)
+        }
+    }
+
+    #[test]
+    fn workload_down_waits_for_a_clean_restart() {
+        let rules = |pods: Vec<PodInfo>| -> Vec<String> {
+            let snap = ClusterSnapshot { workloads: vec![workload("Deployment", "web", 0, 1)], pods, ..Default::default() };
+            detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.rule).filter(|r| r.starts_with("workload-")).collect()
+        };
+        assert!(rules(vec![owned("web-1", "web", 30_000)]).is_empty(), "its pod was just replaced and is starting");
+        assert_eq!(rules(vec![owned("web-1", "web", STARTUP_GRACE_MS + 1)]), ["workload-down"], "still not up after the grace period");
+        assert_eq!(rules(vec![]), ["workload-down"], "no pods at all");
+        let mut crashing = owned("web-1", "web", 30_000);
+        crashing.containers[0].restarts = 2;
+        assert_eq!(rules(vec![crashing]), ["workload-down"], "a restarting pod isn't a clean start");
+    }
+
+    #[test]
+    fn failed_cron_run_clears_after_a_later_success() {
+        let failed = WorkloadInfo { condition_message: Some("BackoffLimitExceeded".into()), created_ms: Some(1), ..workload("Job", "backup-100", 0, 1) };
+        let later_ok = WorkloadInfo { created_ms: Some(2), ..workload("Job", "backup-200", 1, 1) };
+        let cron = workload("CronJob", "backup", 0, 0);
+        let rules = |workloads: Vec<WorkloadInfo>| -> Vec<String> {
+            detect(&ClusterSnapshot { workloads, ..Default::default() }, &Settings::default(), NOW).into_iter().map(|i| i.rule).collect()
+        };
+        assert_eq!(rules(vec![cron.clone(), failed.clone()]), ["job-failed"]);
+        assert!(rules(vec![cron, failed.clone(), later_ok.clone()]).is_empty());
+        assert_eq!(rules(vec![failed, later_ok]), ["job-failed"], "a standalone Job stays until it's deleted");
+    }
+
+    #[test]
+    fn events_for_pods_that_are_gone_are_dropped() {
+        let ev = |name: &str| EventInfo {
+            namespace: "default".into(),
+            object_kind: "Pod".into(),
+            object_name: name.into(),
+            reason: "Unhealthy".into(),
+            message: "Readiness probe failed".into(),
+            count: 3,
+            first_ms: Some(NOW - 120_000),
+            last_ms: Some(NOW - 60_000),
+            ..Default::default()
+        };
+        let snap = ClusterSnapshot { pods: vec![pod("here")], events: vec![ev("here"), ev("replaced")], ..Default::default() };
+        let names: Vec<String> = detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.name).collect();
+        assert_eq!(names, ["here"]);
     }
 }

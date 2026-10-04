@@ -19,7 +19,7 @@ export interface ActionTarget {
 export const ACTION_LABELS: Record<ActionKind, string> = {
   viewLogs: "Logs",
   viewPreviousLogs: "Crash logs",
-  deletePod: "Restart pod",
+  deletePod: "Delete pod",
   rolloutRestart: "Rollout restart",
   scale: "Scale",
   cordon: "Cordon",
@@ -59,7 +59,7 @@ export async function runAction(action: ActionKind, t: ActionTarget): Promise<vo
       nav.openPod(ns, t.name, "previous");
       return;
     case "deletePod":
-      if (await confirmDestructive(`Delete pod ${ns}/${t.name}?\n\nIts controller will create a replacement. A pod with no controller is gone for good.`, "Restart pod")) {
+      if (await confirmDestructive(`Delete pod ${ns}/${t.name}?\n\nIts controller will create a replacement. A pod with no controller is gone for good.`, "Delete pod")) {
         await attempt(`Deleted ${t.name}`, () => ipc.deletePod(ns, t.name));
       }
       return;

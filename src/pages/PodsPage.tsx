@@ -5,7 +5,7 @@ import { runAction } from "../lib/actions";
 import { fmtAge, fmtBytes, fmtCpu } from "../lib/format";
 import type { PodInfo, PodLogTotals } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
-import { NamespaceSelect, PageHeader, SearchInput, SortTh, StatusPill, statusTone } from "../components/ui";
+import { EmptyState, NamespaceSelect, PageHeader, SearchInput, SortTh, StatusPill, statusTone } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 
@@ -19,6 +19,7 @@ export default function PodsPage() {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "errors", dir: -1 });
   const [counts, setCounts] = useState<Map<string, PodLogTotals>>(new Map());
   const logTick = useClusterStore((s) => s.logSyncTick);
+  const clusterId = useClusterStore((s) => s.status?.clusterId);
   const { openPod } = useNavStore();
 
   useEffect(() => {
@@ -26,7 +27,7 @@ export default function PodsPage() {
       .podLogCounts(Date.now() - 24 * 3600_000)
       .then((rows) => setCounts(new Map(rows.map((r) => [`${r.namespace}/${r.pod}`, r]))))
       .catch(() => setCounts(new Map()));
-  }, [logTick]);
+  }, [logTick, clusterId]);
 
   return (
     <SnapshotGate>
@@ -123,9 +124,9 @@ function PodsTable(props: {
         <table className="table">
           <thead>
             <tr>
-              <SortTh label="Name" k="name" {...props} />
-              <SortTh label="Namespace" k="namespace" {...props} />
-              <SortTh label="Status" k="status" {...props} />
+              <SortTh label="Name" k="name" text {...props} />
+              <SortTh label="Namespace" k="namespace" text {...props} />
+              <SortTh label="Status" k="status" text {...props} />
               <th>Ready</th>
               <SortTh label="Restarts" k="restarts" {...props} className="text-right" />
               <SortTh label="CPU" k="cpu" {...props} className="text-right" />
@@ -182,6 +183,7 @@ function PodsTable(props: {
             })}
           </tbody>
         </table>
+        {rows.length === 0 && <EmptyState title="No pods match">{pods.length ? "Nothing fits the status, namespace and search filters." : "The cluster has no pods."}</EmptyState>}
       </div>
     </div>
   );

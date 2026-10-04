@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as ipc from "../lib/ipc";
-import { errorMessage, fmtCount } from "../lib/format";
-import { bucketFor, FILTER_LEVELS, LOG_RANGES, useDebounced } from "../lib/logs";
-import type { HistogramBucket, LogLevel, LogQuery, LogRecord, LogSource, WorkloadRef } from "../lib/types";
+import { useMemo, useState } from "react";
+import { fmtCount } from "../lib/format";
+import { bucketFor, FILTER_LEVELS, LOG_PAGE, LOG_RANGES, useDebounced, useLogResults } from "../lib/logs";
+import type { LogLevel, LogQuery, LogSource, WorkloadRef } from "../lib/types";
 import { useClusterStore } from "../stores/cluster";
 import { LOG_LEVEL_SERIES, StackedBars } from "./charts";
 import LogView from "./LogView";
 import { EmptyState, Spinner } from "./ui";
 
-const PAGE = 500;
 
 /**
  * A workload's lines from the local store: every pod it has had, including
@@ -29,12 +27,6 @@ export default function StoredLogs({
   const [pod, setPod] = useState("");
   const [levels, setLevels] = useState<Set<LogLevel>>(new Set());
   const [rangeMs, setRangeMs] = useState<number | null>(null);
-  const [rows, setRows] = useState<LogRecord[]>([]);
-  const [hist, setHist] = useState<HistogramBucket[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const loadingMore = useRef(false);
 
   const debouncedSearch = useDebounced(search, 300);
   const now = useMemo(() => Date.now(), [logTick, rangeMs]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -50,39 +42,14 @@ export default function StoredLogs({
       pod: pod || null,
       levels: [...levels],
       sinceMs: since,
-      limit: PAGE,
+      limit: LOG_PAGE,
     }),
     [debouncedSearch, namespace, workload, pod, levels, since],
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [r, h] = await Promise.all([ipc.queryLogs(query), ipc.logHistogram({ ...query, limit: null }, bucketMs)]);
-      setRows(r);
-      setHist(h);
-      setHasMore(r.length === PAGE);
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [query, bucketMs]);
-
-  useEffect(() => void load(), [load]);
-
-  const loadMore = useCallback(async () => {
-    if (!hasMore || loadingMore.current || !rows.length) return;
-    loadingMore.current = true;
-    try {
-      const more = await ipc.queryLogs({ ...query, beforeId: rows[rows.length - 1].id });
-      setRows((r) => [...r, ...more]);
-      setHasMore(more.length === PAGE);
-    } finally {
-      loadingMore.current = false;
-    }
-  }, [hasMore, rows, query]);
+  // What was asked for, as opposed to `query`, whose time window moves with every sync.
+  const resetKey = JSON.stringify([debouncedSearch, namespace, workload, pod, [...levels], rangeMs]);
+  const { rows, hist, loading, error, loadMore } = useLogResults(query, bucketMs, resetKey, logTick);
 
   const logRows = useMemo(
     () =>

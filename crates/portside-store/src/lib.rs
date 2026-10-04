@@ -129,6 +129,8 @@ CREATE INDEX IF NOT EXISTS idx_issue_seen ON issue_history (cluster, last_seen_m
 ";
 
 const SETTINGS_KEY: &str = "settings";
+/// Copy of a settings value that couldn't be parsed, kept so it can be recovered by hand.
+pub const SETTINGS_UNREADABLE_KEY: &str = "settings.unreadable";
 
 fn level_to_i(l: Level) -> i64 {
     match l {
@@ -186,7 +188,8 @@ pub struct LogQuery {
     pub levels: Vec<String>,
     pub since_ms: Option<i64>,
     pub until_ms: Option<i64>,
-    /// Keyset pagination: only rows older than this id.
+    /// Keyset pagination: only rows that sort after this one (older, or the
+    /// same instant with a lower id). Pass the last row of the previous page.
     pub before_id: Option<i64>,
     pub limit: Option<u32>,
 }
@@ -304,11 +307,40 @@ impl Store {
             .query_row("SELECT value FROM settings WHERE key = ?1", [SETTINGS_KEY], |r| r.get(0))
             .optional()?;
         let mut settings: Settings = match raw {
-            Some(json) => serde_json::from_str(&json)?,
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(s) => s,
+                Err(e) => {
+                    // The caller falls back to defaults and the next save replaces
+                    // the row, so keep what was there.
+                    conn.execute(
+                        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        params![SETTINGS_UNREADABLE_KEY, json],
+                    )?;
+                    return Err(e.into());
+                }
+            },
             None => Settings::default(),
         };
         settings.normalize();
         Ok(settings)
+    }
+
+    /// A random id for this install, created on first use. It marks what the
+    /// app leaves on a cluster (file-browser helper pods) as its own.
+    pub fn install_id(&self) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<String> =
+            conn.query_row("SELECT value FROM settings WHERE key = 'install_id'", [], |r| r.get(0)).optional()?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        let id = format!("{:016x}", h.finish());
+        conn.execute("INSERT INTO settings (key, value) VALUES ('install_id', ?1)", params![id])?;
+        Ok(id)
     }
 
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
@@ -486,20 +518,22 @@ impl Store {
         (sql, p)
     }
 
-    /// Newest-first page of log lines.
+    /// Newest-first page of log lines, by the lines' own timestamps. (Ids
+    /// follow pull order: a pod seen for the first time inserts a day of old
+    /// lines after everyone else's recent ones.)
     pub fn query_logs(&self, cluster: &str, q: &LogQuery) -> Result<Vec<LogRecord>> {
         use rusqlite::types::Value;
         let conn = self.conn.lock().unwrap();
         let pods = Self::query_pods(&conn, cluster, q)?;
         let (mut filter, mut p) = Self::log_filter(cluster, q, pods.as_deref());
         if let Some(b) = q.before_id {
-            filter.push_str(" AND l.id < ?");
+            filter.push_str(" AND (l.ts_ns, l.id) < (SELECT ts_ns, id FROM logs WHERE id = ?)");
             p.push(Value::Integer(b));
         }
         let limit = q.limit.unwrap_or(500).min(5000);
         let sql = format!(
             "SELECT l.id, l.ts_ns, l.namespace, l.pod, l.container, l.level, l.message
-             FROM logs l WHERE {filter} ORDER BY l.id DESC LIMIT {limit}"
+             FROM logs l WHERE {filter} ORDER BY l.ts_ns DESC, l.id DESC LIMIT {limit}"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(p), |r| {
@@ -1108,6 +1142,49 @@ mod tests {
     #[test]
     fn patterns_collapse_digits() {
         assert_eq!(normalize_pattern("timeout after 3012ms (try 2)"), "timeout after #ms (try #)");
+    }
+
+    #[test]
+    fn unreadable_settings_are_kept_aside() {
+        let s = Store::open_in_memory().unwrap();
+        let bad = r#"{"connections":"not a list"}"#;
+        s.conn.lock().unwrap().execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![SETTINGS_KEY, bad]).unwrap();
+        assert!(s.load_settings().is_err());
+        // Saving defaults over the row doesn't lose what was there.
+        s.save_settings(&Settings::default()).unwrap();
+        let kept: String = s
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [SETTINGS_UNREADABLE_KEY], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, bad);
+        assert_eq!(s.load_settings().unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn log_pages_follow_time_not_insert_order() {
+        let s = Store::open_in_memory().unwrap();
+        let cur = LogCursor { last_ts_ns: 0, restart_count: 0 };
+        // "a" is pulled first with recent lines; "b" shows up later with older ones.
+        s.append_logs("c", "u-a", "app", cur, &[pod_log("a", 500, Level::Info, "a1"), pod_log("a", 600, Level::Info, "a2")], 0).unwrap();
+        s.append_logs("c", "u-b", "app", cur, &[pod_log("b", 100, Level::Info, "b1"), pod_log("b", 550, Level::Info, "b2")], 0).unwrap();
+        let page = |before_id| {
+            s.query_logs("c", &LogQuery { limit: Some(2), before_id, ..Default::default() }).unwrap()
+        };
+        let first = page(None);
+        assert_eq!(first.iter().map(|r| r.message.as_str()).collect::<Vec<_>>(), ["a2", "b2"]);
+        let second = page(Some(first[1].id));
+        assert_eq!(second.iter().map(|r| r.message.as_str()).collect::<Vec<_>>(), ["a1", "b1"]);
+        assert!(page(Some(second[1].id)).is_empty());
+    }
+
+    #[test]
+    fn install_id_is_created_once() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.install_id().unwrap();
+        assert_eq!(id.len(), 16);
+        assert_eq!(s.install_id().unwrap(), id);
     }
 
     #[test]

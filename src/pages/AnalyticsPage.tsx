@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../lib/ipc";
-import { fmtAgo, fmtCount, fmtDuration } from "../lib/format";
+import { errorMessage, fmtAgo, fmtCount, fmtDuration } from "../lib/format";
 import type { ErrorPattern, HistogramBucket, IssueHistoryEntry, PodLogTotals } from "../lib/types";
 import { LOG_LEVEL_SERIES, StackedBars } from "../components/charts";
 import { EmptyState, PageHeader, SeverityBadge } from "../components/ui";
@@ -23,7 +23,9 @@ export default function AnalyticsPage() {
   const snapshot = useClusterStore((s) => s.snapshot);
   const { openLogs, openPod } = useNavStore();
 
+  const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
+    let current = true; // a slower answer for the previous range must not overwrite this one
     const since = Date.now() - range.ms;
     Promise.all([
       ipc.logHistogram({ sinceMs: since }, range.bucket),
@@ -32,12 +34,15 @@ export default function AnalyticsPage() {
       ipc.issueHistory(since, 2000),
     ])
       .then(([h, t, p, i]) => {
+        if (!current) return;
         setHist(h);
         setTopPods(t);
         setPatterns(p);
         setHistory(i);
+        setLoadError(null);
       })
-      .catch(() => undefined);
+      .catch((e) => current && setLoadError(errorMessage(e)));
+    return () => void (current = false);
   }, [range, logTick]);
 
   // Problem frequency: occurrences and total open time per rule.
@@ -70,6 +75,7 @@ export default function AnalyticsPage() {
           </button>
         ))}
       </PageHeader>
+      {loadError && <p className="px-6 pt-3 text-xs text-critical">Couldn't load the analytics: {loadError}</p>}
       <div className="grid gap-4 p-6 xl:grid-cols-2">
         <section className="card p-4 xl:col-span-2">
           <h2 className="card-title mb-3">Log volume by level</h2>

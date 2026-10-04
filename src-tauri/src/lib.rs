@@ -219,6 +219,7 @@ pub fn run() {
             commands::open_volume_files,
             commands::refresh_volume_files,
             commands::close_volume_files,
+            commands::release_volume_files,
             commands::list_volume_files,
             commands::make_volume_dir,
             commands::delete_volume_path,

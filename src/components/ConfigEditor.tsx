@@ -124,6 +124,11 @@ export default function ConfigEditor() {
   };
 
   const restartUsers = async () => {
+    const ok = await confirmDestructive(
+      `Rollout restart ${restartable.join(", ")}?\n\nTheir pods are replaced one by one so they pick up the new values.`,
+      "Restart",
+    );
+    if (!ok) return;
     setBusy("restart");
     const failures: string[] = [];
     for (const u of restartable) {
@@ -150,7 +155,15 @@ export default function ConfigEditor() {
           <button className="btn-ghost" title="Reload from cluster" disabled={!!busy} onClick={() => void reload()}>
             {busy === "load" ? <Spinner size={14} /> : <RefreshCw size={14} />}
           </button>
-          <button className="btn-ghost" onClick={() => openEditor({ ...target })} title="Edit the full YAML (labels, annotations…)">
+          <button
+            className="btn-ghost"
+            onClick={async () => {
+              // The YAML editor replaces this drawer, so unsaved edits here go.
+              if (dirty && !(await confirmDestructive("Discard your unsaved changes and open the YAML?", "Unsaved changes"))) return;
+              openEditor({ ...target });
+            }}
+            title="Edit the full YAML (labels, annotations…)"
+          >
             <FileCode2 size={14} /> YAML
           </button>
           <button className="btn-primary" disabled={!dirty || !!busy || problems.length > 0 || readOnly} onClick={() => void save()}>

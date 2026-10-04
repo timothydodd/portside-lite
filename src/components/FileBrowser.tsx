@@ -23,9 +23,10 @@ import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage, fmtAgo, fmtBytes, fmtDateTime } from "../lib/format";
 import type { FileEntry, FileListing, FileProgress, FileSession } from "../lib/types";
+import { confirmLeaveFiles, useFilesStore } from "../stores/files";
 import { useNavStore } from "../stores/nav";
 import { toast } from "../stores/toast";
-import { Drawer, EmptyState, Modal, Spinner } from "./ui";
+import { ActionMenu, Drawer, EmptyState, Modal, Spinner } from "./ui";
 
 const join = (dir: string, name: string) => (dir ? `${dir}/${name}` : name);
 const isFolder = (e: FileEntry) => e.kind === "dir" || e.linkToDir;
@@ -69,8 +70,14 @@ export default function FilesDrawer() {
   const { files, closeFiles } = useNavStore();
   if (!files) return null;
   return (
-    <Drawer title={files.claim} subtitle={<>PersistentVolumeClaim · {files.namespace} · files</>} onClose={closeFiles}>
-      <FileBrowser namespace={files.namespace} claim={files.claim} />
+    <Drawer
+      title={files.claim}
+      subtitle={<>PersistentVolumeClaim · {files.namespace} · files</>}
+      wide
+      explicitClose
+      onClose={() => void confirmLeaveFiles().then((ok) => ok && closeFiles())}
+    >
+      <FileBrowser key={`${files.namespace}/${files.claim}`} namespace={files.namespace} claim={files.claim} />
     </Drawer>
   );
 }
@@ -92,16 +99,21 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
 
   useEffect(() => setPath(""), [namespace, claim]);
 
+  // Only the newest request may land: an answer for a folder the user already left is dropped.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
     if (!session) return;
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      setListing(await ipc.listVolumeFiles(session.id, path));
+      const l = await ipc.listVolumeFiles(session.id, path);
+      if (seq !== loadSeq.current) return;
+      setListing(l);
       setListError(null);
     } catch (e) {
-      setListError(errorMessage(e));
+      if (seq === loadSeq.current) setListError(errorMessage(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [session?.id, session?.pod, path]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => void load(), [load]);
@@ -114,7 +126,18 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
     return () => void un.then((f) => f());
   }, []);
 
+  // Leaving mid-transfer (after the confirmation the drawers ask for) stops it.
+  useEffect(
+    () => () => {
+      if (transferId.current) void ipc.cancelTransfer(transferId.current);
+      useFilesStore.getState().setTransferring(false);
+    },
+    [],
+  );
+
   const busy = transfer != null;
+  // Rows belong to the folder they were listed from, which trails `path` while the next one loads.
+  const shownPath = listing?.path ?? path;
   const writable = !!session?.writable;
 
   /** Run a write; a refusal (someone scaled the app back up) refreshes the session state. */
@@ -133,11 +156,16 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
     const id = crypto.randomUUID();
     transferId.current = id;
     setTransfer({ transferId: id, label, done: 0, total: null });
+    useFilesStore.getState().setTransferring(true);
     try {
       return await fn(id);
     } finally {
-      transferId.current = null;
-      setTransfer(null);
+      // Unmounting cancels and clears these itself; a newer transfer owns them now.
+      if (transferId.current === id) {
+        transferId.current = null;
+        setTransfer(null);
+        useFilesStore.getState().setTransferring(false);
+      }
     }
   };
 
@@ -145,7 +173,7 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
     if (!session) return;
     const folder = e == null || isFolder(e);
     const name = e?.name ?? (path.split("/").pop() || claim);
-    const target = e ? join(path, e.name) : path;
+    const target = e ? join(shownPath, e.name) : path;
     const dest = await save({
       defaultPath: folder ? `${name}.tar.gz` : name,
       filters: folder ? [{ name: "gzip'd tar", extensions: ["tar.gz", "tgz"] }] : undefined,
@@ -161,6 +189,11 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
 
   const upload = async (paths: string[]) => {
     if (!session || paths.length === 0) return;
+    // A drop can arrive mid-transfer; a second one would take over the progress bar and the close guard.
+    if (transferId.current) {
+      toast.info("Wait for the current transfer to finish first.");
+      return;
+    }
     let picked;
     try {
       picked = await ipc.localPathInfo(paths);
@@ -168,7 +201,12 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
       toast.error(errorMessage(err));
       return;
     }
-    const existing = new Map((listing?.entries ?? []).map((x) => [x.name, x]));
+    // The overwrite check below needs this folder's own rows.
+    if (listing?.path !== path) {
+      toast.info("Still loading this folder; try again in a moment.");
+      return;
+    }
+    const existing = new Map(listing.entries.map((x) => [x.name, x]));
     const clashes = picked.filter((p) => existing.has(p.name));
     if (clashes.length > 0) {
       const badFolder = clashes.find((c) => !c.dir && existing.get(c.name) && isFolder(existing.get(c.name)!));
@@ -230,7 +268,7 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
     const what = isFolder(e) && e.kind === "dir" ? `the folder ${e.name} and everything in it` : e.name;
     if (!(await confirmDestructive(`Delete ${what} from ${claim}?\n\nThis can't be undone.`, "Delete"))) return;
     await write(async () => {
-      await ipc.deleteVolumePath(session.id, join(path, e.name));
+      await ipc.deleteVolumePath(session.id, join(shownPath, e.name));
       toast.success(`Deleted ${e.name}`);
     });
   };
@@ -351,7 +389,7 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
                   <tr
                     key={e.name}
                     className={folder ? "cursor-pointer" : undefined}
-                    onClick={folder ? () => setPath(join(path, e.name)) : undefined}
+                    onClick={folder ? () => setPath(join(shownPath, e.name)) : undefined}
                   >
                     <td>
                       <span className="flex items-center gap-2">
@@ -366,32 +404,29 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
                       {e.modifiedMs ? fmtAgo(e.modifiedMs) : "—"}
                     </td>
                     <td className="whitespace-nowrap text-right" onClick={(ev) => ev.stopPropagation()}>
-                      {(e.kind === "file" || folder) && (
-                        <button className="btn-quiet" disabled={busy} title={folder ? "Download as .tar.gz" : "Download"} onClick={() => void download(e)}>
-                          <Download size={14} />
-                        </button>
-                      )}
-                      {writable && (
-                        <>
-                          <button
-                            className="btn-quiet"
-                            disabled={busy}
-                            title="Rename"
-                            onClick={() =>
+                      <ActionMenu
+                        label={`Actions for ${e.name}`}
+                        items={[
+                          (e.kind === "file" || folder) && {
+                            label: folder ? "Download as .tar.gz" : "Download",
+                            icon: <Download size={14} />,
+                            disabled: busy,
+                            onSelect: () => void download(e),
+                          },
+                          writable && {
+                            label: "Rename",
+                            icon: <Pencil size={14} />,
+                            disabled: busy,
+                            onSelect: () =>
                               setNaming({
                                 title: `Rename ${e.name}`,
                                 initial: e.name,
-                                submit: (name) => write(() => ipc.renameVolumePath(session.id, join(path, e.name), name)),
-                              })
-                            }
-                          >
-                            <Pencil size={14} />
-                          </button>
-                          <button className="btn-quiet hover:!text-critical" disabled={busy} title="Delete" onClick={() => void remove(e)}>
-                            <Trash2 size={14} />
-                          </button>
-                        </>
-                      )}
+                                submit: (name) => write(() => ipc.renameVolumePath(session.id, join(shownPath, e.name), name)),
+                              }),
+                          },
+                          writable && { label: "Delete", icon: <Trash2 size={14} />, danger: true, disabled: busy, onSelect: () => void remove(e) },
+                        ]}
+                      />
                     </td>
                   </tr>
                 );

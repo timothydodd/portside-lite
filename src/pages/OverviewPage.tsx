@@ -7,11 +7,13 @@ import { LineChart } from "../components/charts";
 import IssueCard from "../components/IssueCard";
 import SnapshotGate from "../components/SnapshotGate";
 import { Meter, PageHeader, StatTile, StatusPill } from "../components/ui";
+import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 
 export default function OverviewPage() {
   const { go, openNode, openPod } = useNavStore();
   const [history, setHistory] = useState<Sample[]>([]);
+  const clusterId = useClusterStore((s) => s.status?.clusterId);
 
   useEffect(() => {
     const load = () =>
@@ -19,7 +21,7 @@ export default function OverviewPage() {
     void load();
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
-  }, []);
+  }, [clusterId]);
 
   return (
     <SnapshotGate>

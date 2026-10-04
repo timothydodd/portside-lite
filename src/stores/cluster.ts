@@ -39,9 +39,13 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
   init: async () => {
     if (initialized) return;
     initialized = true;
+    void ipc.releaseVolumeFiles().catch(() => undefined);
     await Promise.all([
       listen<ClusterSnapshot>("cluster:snapshot", (e) => set({ snapshot: e.payload })),
-      listen<Status>("cluster:status", (e) => set({ status: e.payload })),
+      // A status for another cluster means what's on screen is the old one's.
+      listen<Status>("cluster:status", (e) =>
+        set((s) => ({ status: e.payload, snapshot: s.snapshot && s.snapshot.clusterId !== e.payload.clusterId ? null : s.snapshot })),
+      ),
       listen<Settings>("settings:changed", (e) => set({ settings: e.payload })),
       listen<number>("logs:synced", () => set((s) => ({ logSyncTick: s.logSyncTick + 1 }))),
       listen<ForwardInfo[]>("forwards:changed", (e) => set({ forwards: e.payload })),
@@ -56,12 +60,13 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
   },
 
   saveSettings: async (s) => {
+    // Read before saving: the backend's settings:changed event lands first and would hide the change.
+    const before = JSON.stringify(activeConnection(get().settings));
     const saved = await ipc.saveSettings(s);
     set((prev) => ({
       settings: saved,
       // A different (or edited) active connection invalidates what's on screen.
-      snapshot:
-        JSON.stringify(activeConnection(prev.settings)) === JSON.stringify(activeConnection(saved)) ? prev.snapshot : null,
+      snapshot: before === JSON.stringify(activeConnection(saved)) ? prev.snapshot : null,
     }));
   },
 

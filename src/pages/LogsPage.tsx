@@ -1,17 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RefreshCw, X, ZoomOut } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import { errorMessage, fmtCount, fmtDateTime } from "../lib/format";
+import { fmtCount, fmtDateTime } from "../lib/format";
 import { ownedBy } from "../lib/workloads";
-import { bucketFor, FILTER_LEVELS as LEVELS, LOG_RANGES as RANGES, useDebounced } from "../lib/logs";
-import type { HistogramBucket, LogLevel, LogQuery, LogRecord, LogSource } from "../lib/types";
+import { bucketFor, FILTER_LEVELS as LEVELS, LOG_PAGE, LOG_RANGES as RANGES, useDebounced, useLogResults } from "../lib/logs";
+import type { LogLevel, LogQuery, LogSource } from "../lib/types";
 import { LOG_LEVEL_SERIES, StackedBars } from "../components/charts";
 import LogView from "../components/LogView";
 import { EmptyState, NamespaceSelect, PageHeader, SearchInput, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
+import { toast } from "../stores/toast";
 
-const PAGE = 500;
 
 export default function LogsPage() {
   const snapshot = useClusterStore((s) => s.snapshot);
@@ -44,12 +44,6 @@ export default function LogsPage() {
     setZoom(null);
   }, [preset, consumePreset]);
 
-  const [rows, setRows] = useState<LogRecord[]>([]);
-  const [hist, setHist] = useState<HistogramBucket[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const loadingMore = useRef(false);
 
   // Pods with stored lines, alive or gone: feeds the pod and workload pickers.
   const [sources, setSources] = useState<LogSource[]>([]);
@@ -77,39 +71,14 @@ export default function LogsPage() {
       levels: [...levels],
       sinceMs: since,
       untilMs: until,
-      limit: PAGE,
+      limit: LOG_PAGE,
     }),
     [debouncedSearch, namespace, workloadRef, pod, levels, since, until],
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [r, h] = await Promise.all([ipc.queryLogs(query), ipc.logHistogram({ ...query, limit: null }, bucketMs)]);
-      setRows(r);
-      setHist(h);
-      setHasMore(r.length === PAGE);
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [query, bucketMs]);
-
-  useEffect(() => void load(), [load]);
-
-  const loadMore = useCallback(async () => {
-    if (!hasMore || loadingMore.current || !rows.length) return;
-    loadingMore.current = true;
-    try {
-      const more = await ipc.queryLogs({ ...query, beforeId: rows[rows.length - 1].id });
-      setRows((r) => [...r, ...more]);
-      setHasMore(more.length === PAGE);
-    } finally {
-      loadingMore.current = false;
-    }
-  }, [hasMore, rows, query]);
+  // What was asked for, as opposed to `query`, whose time window moves with every sync.
+  const resetKey = JSON.stringify([debouncedSearch, namespace, workload, pod, [...levels], rangeMs, zoom]);
+  const { rows, hist, loading, error, loadMore } = useLogResults(query, bucketMs, resetKey, logTick);
 
   // Live pods plus pods that only exist in the store now (scaled down,
   // replaced, deleted, archived).
@@ -163,7 +132,7 @@ export default function LogsPage() {
         title="Log explorer"
         subtitle={`${fmtCount(total)} lines in range · ${fmtCount(errors)} errors · stored locally, searchable offline`}
       >
-        <button className="btn-ghost" onClick={() => void ipc.syncLogsNow()} title="Pull new logs from the cluster now">
+        <button className="btn-ghost" onClick={() => void ipc.syncLogsNow().then(() => toast.info("Pulling new logs…"))} title="Pull new logs from the cluster now">
           <RefreshCw size={14} /> Sync now
         </button>
       </PageHeader>

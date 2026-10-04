@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { refreshNow } from "../lib/ipc";
+import { toast } from "../stores/toast";
 import { fmtAgo } from "../lib/format";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
@@ -57,7 +58,7 @@ export default function StatusBar() {
         {status?.lastLogSyncMs != null && ` · +${status.lastLogSyncLines.toLocaleString()} lines`}
         {status?.logSyncErrors ? ` · ${status.logSyncErrors} failed` : ""}
       </span>
-      <button className="flex items-center gap-1 hover:text-content" onClick={() => void refreshNow()} title="Poll now">
+      <button className="flex items-center gap-1 hover:text-content" onClick={() => void refreshNow().then(() => toast.info("Checking the cluster now…"))} title="Poll now">
         <RefreshCw size={12} />
       </button>
     </footer>

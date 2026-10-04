@@ -156,7 +156,7 @@ export function Toasts() {
           <div key={t.id} className="card pointer-events-auto flex items-start gap-2 px-3 py-2.5 text-sm shadow-[var(--shadow-md)]">
             <Icon size={16} className={`mt-0.5 shrink-0 ${color}`} />
             <span className="min-w-0 flex-1 break-words text-content">{t.message}</span>
-            <button className="text-content-muted hover:text-content" onClick={() => dismiss(t.id)}>
+            <button className="text-content-muted hover:text-content" title="Dismiss" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
               <X size={14} />
             </button>
           </div>

@@ -629,6 +629,10 @@ pub async fn archive_workload(
     remove: Vec<ObjectRef>,
     include_logs: bool,
 ) -> CmdResult<ArchiveOutcome> {
+    // Archiving ends in a delete; only what the archive can bring back qualifies.
+    if !portside_kube::archive::WORKLOAD_KINDS.contains(&kind.as_str()) {
+        return Err(format!("Archiving a {kind} isn't supported."));
+    }
     let settings = state.monitor.settings();
     let profile = settings.active_profile().ok_or("No cluster connection configured.")?.clone();
     let cluster_id = profile.connection.cluster_id();
@@ -694,8 +698,10 @@ pub async fn archive_workload(
         }
     }
     let (root2, meta2) = (root.clone(), meta.clone());
-    blocking(move || archives::save_meta(&root2, &meta2)).await?;
+    let noted = blocking(move || archives::save_meta(&root2, &meta2)).await;
     state.monitor.refresh_now();
+    // The removal has happened either way, so the error has to say so.
+    noted.map_err(|e| format!("The archive was saved and the objects were removed from the cluster, but its archive.json couldn't be updated with that: {e}"))?;
     Ok(ArchiveOutcome { archive: meta, results })
 }
 
@@ -794,6 +800,14 @@ pub async fn open_volume_files(
 #[tauri::command]
 pub async fn refresh_volume_files(state: State<'_, AppState>, id: u64) -> CmdResult<portside_monitor::files::FileSession> {
     state.monitor.refresh_files(id).await
+}
+
+/// Called once when the UI starts: after a window reload no view holds the
+/// sessions the previous page opened.
+#[tauri::command]
+pub async fn release_volume_files(state: State<'_, AppState>) -> CmdResult<()> {
+    state.monitor.release_all_files().await;
+    Ok(())
 }
 
 #[tauri::command]

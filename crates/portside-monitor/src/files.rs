@@ -29,6 +29,8 @@ const IDLE_CLOSE: Duration = Duration::from_secs(30);
 /// Upper bound for deleting a helper on shutdown or cluster switch.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_EVERY: Duration = Duration::from_millis(200);
+/// How often a multi-file upload re-checks that the claim is still unused.
+const WRITE_RECHECK: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +71,7 @@ pub struct UploadSummary {
     pub bytes: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct SessionEntry {
     info: FileSession,
     client: Arc<ClusterClient>,
@@ -77,6 +80,8 @@ pub(crate) struct SessionEntry {
     refs: usize,
     /// Bumped on every open/close so a stale idle timer does nothing.
     generation: u64,
+    /// Held while the helper is being checked or (re)started.
+    gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -100,48 +105,108 @@ impl Monitor {
     /// active cluster, starting the helper pod if needed.
     pub async fn open_files(&self, namespace: &str, claim: &str) -> Result<FileSession, String> {
         let profile_id = self.settings().active_connection_id.ok_or("No cluster connection configured.")?;
-        let mut sessions = self.file_sessions.lock().await;
-        if let Some(entry) =
-            sessions.values_mut().find(|e| e.info.profile_id == profile_id && e.info.namespace == namespace && e.info.claim == claim)
-        {
-            self.refresh_entry(entry).await?;
-            entry.refs += 1;
-            entry.generation += 1;
-            return Ok(entry.info.clone());
-        }
-        let client = self.client().await?;
-        let id = self.next_file_session.fetch_add(1, Ordering::Relaxed);
-        let mut entry = SessionEntry {
-            info: FileSession {
-                id,
-                profile_id,
-                namespace: namespace.into(),
-                claim: claim.into(),
-                pod: String::new(),
-                writable: false,
-                blockers: Vec::new(),
-                mounted_by: Vec::new(),
-                started_ms: 0,
-                expires_ms: 0,
-            },
-            client,
-            mounted_rw: false,
-            refs: 1,
-            generation: 0,
+        let join = |sessions: &mut HashMap<u64, SessionEntry>| {
+            let e = sessions.values_mut().find(|e| e.info.profile_id == profile_id && e.info.namespace == namespace && e.info.claim == claim)?;
+            e.refs += 1;
+            e.generation += 1;
+            Some(e.info.id)
         };
-        self.refresh_entry(&mut entry).await?;
-        let info = entry.info.clone();
-        sessions.insert(id, entry);
-        Ok(info)
+        let joined = join(&mut *self.file_sessions.lock().await);
+        let id = match joined {
+            Some(id) => id,
+            None => {
+                let client = self.client().await?;
+                if self.settings.read().unwrap().active_connection_id.as_deref() != Some(profile_id.as_str()) {
+                    return Err("The active cluster changed. Reopen the volume.".into());
+                }
+                let mut sessions = self.file_sessions.lock().await;
+                // Someone else may have opened it while this one was connecting.
+                match join(&mut sessions) {
+                    Some(id) => id,
+                    None => {
+                        // Registered before its helper exists, so a second open
+                        // joins this one instead of starting another pod.
+                        let id = self.next_file_session.fetch_add(1, Ordering::Relaxed);
+                        sessions.insert(
+                            id,
+                            SessionEntry {
+                                info: FileSession {
+                                    id,
+                                    profile_id: profile_id.clone(),
+                                    namespace: namespace.into(),
+                                    claim: claim.into(),
+                                    pod: String::new(),
+                                    writable: false,
+                                    blockers: Vec::new(),
+                                    mounted_by: Vec::new(),
+                                    started_ms: 0,
+                                    expires_ms: 0,
+                                },
+                                client,
+                                mounted_rw: false,
+                                refs: 1,
+                                generation: 0,
+                                gate: Default::default(),
+                            },
+                        );
+                        id
+                    }
+                }
+            }
+        };
+        match self.refresh_files(id).await {
+            Ok(info) => Ok(info),
+            Err(e) => {
+                // Give the reference back; with no views left the session goes too.
+                let unused = {
+                    let mut sessions = self.file_sessions.lock().await;
+                    match sessions.get_mut(&id) {
+                        Some(entry) => {
+                            entry.refs = entry.refs.saturating_sub(1);
+                            if entry.refs == 0 { sessions.remove(&id) } else { None }
+                        }
+                        None => None,
+                    }
+                };
+                if let Some(entry) = unused {
+                    stop(&entry).await;
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Re-check who uses the claim; (re)start the helper when it's gone or
     /// when it should now be mounted the other way (read-only ↔ read-write).
+    ///
+    /// Starting a helper can take minutes (image pull, volume attach), so the
+    /// session map is locked only to copy the entry out and to write it back.
+    /// Other sessions, a cluster switch and quitting don't wait for it; the
+    /// per-session gate keeps two refreshes from each starting a pod.
     pub async fn refresh_files(&self, id: u64) -> Result<FileSession, String> {
+        const CLOSED: &str = "That file browser was closed. Reopen the volume.";
+        let gate = Arc::clone(&self.file_sessions.lock().await.get(&id).ok_or(CLOSED)?.gate);
+        let _one_at_a_time = gate.lock().await;
+        let mut work = self.file_sessions.lock().await.get(&id).ok_or(CLOSED)?.clone();
+        let pod_before = work.info.pod.clone();
+        let result = self.refresh_entry(&mut work).await;
         let mut sessions = self.file_sessions.lock().await;
-        let entry = sessions.get_mut(&id).ok_or("That file browser was closed. Reopen the volume.")?;
-        self.refresh_entry(entry).await?;
-        Ok(entry.info.clone())
+        match sessions.get_mut(&id) {
+            Some(entry) => {
+                entry.info = work.info.clone();
+                entry.mounted_rw = work.mounted_rw;
+                result.map(|()| work.info)
+            }
+            None => {
+                // Closed meanwhile (cluster switch, quit). Whoever closed it
+                // stopped the helper it knew about; one started since is ours to stop.
+                drop(sessions);
+                if work.info.pod != pod_before {
+                    stop(&work).await;
+                }
+                Err(CLOSED.into())
+            }
+        }
     }
 
     async fn refresh_entry(&self, entry: &mut SessionEntry) -> Result<(), String> {
@@ -149,7 +214,8 @@ impl Monitor {
         let (ns, claim) = (entry.info.namespace.clone(), entry.info.claim.clone());
         let users = kube_files::claim_users(c, &ns, &claim).await.map_err(err)?;
         let want_rw = users.blockers.is_empty();
-        let alive = !entry.info.pod.is_empty() && kube_files::helper_running(c, &ns, &entry.info.pod).await.unwrap_or(false);
+        // A failed check is an error, not "gone": restarting the helper over a blip would cut off running transfers.
+        let alive = !entry.info.pod.is_empty() && kube_files::helper_running(c, &ns, &entry.info.pod).await.map_err(err)?;
         if !alive || entry.mounted_rw != want_rw {
             if !entry.info.pod.is_empty() {
                 let _ = kube_files::stop_helper(c, &ns, &entry.info.pod).await;
@@ -159,7 +225,7 @@ impl Monitor {
             // ReadWriteOnce storage needs to attach the volume twice.
             let node = users.pods.iter().find_map(|(_, n)| n.clone());
             let image = self.settings().files_helper_image;
-            let pod = kube_files::start_helper(c, &ns, &claim, &image, node.as_deref().filter(|_| !want_rw), !want_rw)
+            let pod = kube_files::start_helper(c, &ns, &claim, &image, node.as_deref().filter(|_| !want_rw), !want_rw, &self.install_id)
                 .await
                 .map_err(err)?;
             entry.info.pod = pod;
@@ -199,6 +265,17 @@ impl Monitor {
                 stop(&e).await;
             }
         });
+    }
+
+    /// The window was reloaded: every view is gone without having closed its
+    /// session, so nothing would ever release them. Treat all as closed.
+    pub async fn release_all_files(self: &Arc<Self>) {
+        let open: Vec<(u64, usize)> = self.file_sessions.lock().await.values().map(|e| (e.info.id, e.refs)).collect();
+        for (id, refs) in open {
+            for _ in 0..refs.max(1) {
+                self.close_files(id).await;
+            }
+        }
     }
 
     /// Delete every helper now (quit, or the active cluster changed).
@@ -325,8 +402,8 @@ impl Monitor {
             })
             .await;
         if res.is_err() {
-            // Cancelled mid-copy: don't leave half a file behind.
-            let _ = tokio::fs::remove_file(&dest).await;
+            // Cancelled mid-copy: drop the partial file. Whatever was at `dest` before is untouched.
+            let _ = tokio::fs::remove_file(kube_files::part_path(&dest)).await;
         }
         res
     }
@@ -349,7 +426,16 @@ impl Monitor {
                 kube_files::run(c, &info.namespace, &info.pod, core_files::mkdirs_command(&dir, &tree.dirs)).await.map_err(err)?;
             }
             let mut done = 0u64;
-            for (local, rel, size) in &tree.files {
+            let mut checked = std::time::Instant::now();
+            for (i, (local, rel, size)) in tree.files.iter().enumerate() {
+                // A long upload re-checks that nothing started using the claim
+                // (at most every few seconds, so small files don't each cost API calls).
+                if checked.elapsed() >= WRITE_RECHECK {
+                    self.writable_session(id)
+                        .await
+                        .map_err(|e| format!("{e} Stopped after {i} of {} files.", tree.files.len()))?;
+                    checked = std::time::Instant::now();
+                }
                 let label = rel.clone();
                 let base = done;
                 let progress = throttled(|n| emit(&label, base + n, Some(total)));

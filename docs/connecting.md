@@ -4,7 +4,7 @@ Add connections under **Settings → Cluster connections**. You can save as many
 local and SSH ones, and switch between them from the dropdown at the top of the sidebar.
 
 Only the active cluster is fully monitored; the others get a light health check in the background.
-Each connection keeps its own stored logs, metrics and problem history.
+Each connection keeps its own stored logs, metrics and problem history. Two connections that point at the same cluster the same way (the same kubeconfig file and context, or the same SSH host and API address) share them.
 
 ## Local kubeconfig
 

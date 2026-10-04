@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "portside-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "k8s-openapi",
  "serde",
@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "portside-kube"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "futures",
  "http",
@@ -3743,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "portside-lite"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "portside-core",
  "portside-kube",
@@ -3762,7 +3762,7 @@ dependencies = [
 
 [[package]]
 name = "portside-monitor"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "futures",
  "portside-core",
@@ -3775,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "portside-store"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "portside-core",
  "rusqlite",

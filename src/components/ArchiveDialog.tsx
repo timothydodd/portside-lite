@@ -112,7 +112,7 @@ export default function ArchiveDialog() {
   };
 
   return (
-    <Modal title={`Archive ${target.kind} ${target.name}`} onClose={closeArchive} wide>
+    <Modal title={`Archive ${target.kind} ${target.name}`} onClose={closeArchive} wide explicitClose={busy || outcome != null}>
       <div className="flex flex-col gap-4 text-sm">
         <p className="text-xs text-content-muted">
           Saves it to a local folder as re-appliable YAML (plus its stored logs), then removes it from the cluster. It shows up under{" "}
@@ -249,7 +249,7 @@ export default function ArchiveDialog() {
             </>
           ) : (
             <>
-              <button className="btn-ghost" onClick={closeArchive}>
+              <button className="btn-ghost" disabled={busy} onClick={closeArchive}>
                 Cancel
               </button>
               <button className="btn-danger" disabled={busy || plan == null} onClick={() => void run()}>

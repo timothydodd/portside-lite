@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Bell, CheckCircle2, FolderOpen, KeyRound, Laptop, Plus, PlugZap, RefreshCw, ShieldAlert, Terminal, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
@@ -8,6 +8,7 @@ import type { Connection, ConnectionProfile, Settings, SshConnection, StorageSta
 import { ModeIcon, connectionSummary } from "../components/ClusterSwitcher";
 import { PageHeader, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
+import { useNavStore } from "../stores/nav";
 import { useThemeStore, type ThemePref } from "../stores/theme";
 import { toast } from "../stores/toast";
 
@@ -23,17 +24,57 @@ const DEFAULT_SSH: SshConnection = {
   sudoPassword: null,
 };
 
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Carry edits over to settings that changed underneath them (paused from the
+ * tray, a host key pinned by a background check): whatever the user hasn't
+ * touched follows `next`, what they have stays.
+ */
+function rebase(draft: Settings, base: Settings, next: Settings): Settings {
+  const out = { ...next } as Record<string, unknown>;
+  for (const k of Object.keys(draft) as (keyof Settings)[]) {
+    if (!same(draft[k], base[k])) out[k] = draft[k];
+  }
+  const merged = out as unknown as Settings;
+  if (!same(draft.connections, base.connections)) {
+    // Fields only the backend sets come from `next` for profiles that still exist.
+    merged.connections = draft.connections.map((p) => {
+      const theirs = next.connections.find((x) => x.id === p.id)?.connection;
+      const ours = base.connections.find((x) => x.id === p.id)?.connection;
+      if (!theirs || !ours || theirs.mode !== p.connection.mode) return p;
+      const c = { ...p.connection, partition: theirs.partition };
+      if (c.mode === "ssh" && theirs.mode === "ssh" && ours.mode === "ssh" && c.hostKeyFingerprint === ours.hostKeyFingerprint) {
+        c.hostKeyFingerprint = theirs.hostKeyFingerprint;
+      }
+      return { ...p, connection: c };
+    });
+  }
+  return merged;
+}
+
 export default function SettingsPage() {
   const saved = useClusterStore((s) => s.settings);
   const saveSettings = useClusterStore((s) => s.saveSettings);
+  const setLeaveGuard = useNavStore((s) => s.setLeaveGuard);
   const [draft, setDraft] = useState<Settings | null>(saved);
   const [saving, setSaving] = useState(false);
 
-  // Adopt backend-side changes (e.g. a newly pinned host key) when not editing.
-  useEffect(() => setDraft(saved), [saved]);
+  // Follow backend-side changes (e.g. a newly pinned host key) without losing edits in progress.
+  const base = useRef(saved);
+  useEffect(() => {
+    const was = base.current;
+    base.current = saved;
+    setDraft((d) => (d && was && saved ? rebase(d, was, saved) : saved));
+  }, [saved]);
+
+  const dirty = !!draft && !same(draft, saved);
+  useEffect(() => {
+    setLeaveGuard(dirty ? () => confirmDestructive("You have unsaved settings.\n\nLeave without saving them?", "Discard changes") : null);
+    return () => setLeaveGuard(null);
+  }, [dirty, setLeaveGuard]);
   if (!draft) return <Spinner />;
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const set = (patch: Partial<Settings>) => setDraft({ ...draft, ...patch });
 
   const save = async () => {
@@ -262,16 +303,20 @@ function LocalForm({ c, onChange }: { c: Extract<Connection, { mode: "local" }>;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let current = true; // the path changes with every keystroke; only the last answer counts
     ipc
       .listKubeContexts(c.kubeconfigPath)
       .then((r) => {
+        if (!current) return;
         setContexts(r);
         setError(null);
       })
       .catch((e) => {
+        if (!current) return;
         setContexts(null);
         setError(errorMessage(e));
       });
+    return () => void (current = false);
   }, [c.kubeconfigPath]);
 
   return (
@@ -290,6 +335,7 @@ function LocalForm({ c, onChange }: { c: Extract<Connection, { mode: "local" }>;
               const f = await openFile({ multiple: false, directory: false });
               if (typeof f === "string") onChange({ ...c, kubeconfigPath: f });
             }}
+            aria-label="Browse"
           >
             <FolderOpen size={14} />
           </button>
@@ -317,7 +363,7 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
         <input className="field w-full" value={c.host} placeholder="k3s-server.lan or 192.168.1.10" onChange={(e) => up({ host: e.target.value.trim() })} />
       </Labeled>
       <Labeled label="Port" className="col-span-1">
-        <input className="field w-full" type="number" value={c.port} onChange={(e) => up({ port: Number(e.target.value) || 22 })} />
+        <NumberInput className="field w-full" value={c.port} min={1} max={65535} onChange={(port) => up({ port })} />
       </Labeled>
       <Labeled label="Username" className="col-span-2">
         <input className="field w-full" value={c.username} onChange={(e) => up({ username: e.target.value.trim() })} />
@@ -356,6 +402,7 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
                   const f = await openFile({ multiple: false, directory: false });
                   if (typeof f === "string") up({ auth: { ...(c.auth as Extract<SshConnection["auth"], { kind: "key" }>), privateKeyPath: f } });
                 }}
+                aria-label="Browse"
               >
                 <FolderOpen size={14} />
               </button>
@@ -413,7 +460,7 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
             <input className="field w-full" value={c.apiHost} onChange={(e) => up({ apiHost: e.target.value.trim() })} />
           </Labeled>
           <Labeled label="API port" className="col-span-2">
-            <input className="field w-full" type="number" value={c.apiPort} onChange={(e) => up({ apiPort: Number(e.target.value) || 6443 })} />
+            <NumberInput className="field w-full" value={c.apiPort} min={1} max={65535} onChange={(apiPort) => up({ apiPort })} />
           </Labeled>
         </div>
       </details>
@@ -437,11 +484,46 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
   );
 }
 
+/**
+ * A number you can type normally: the text is free while typing (so "30"
+ * isn't forced up to the minimum at "3"), a value in range is passed on as
+ * you go, and anything else snaps back into range when you leave the field.
+ */
+function NumberInput({ value, onChange, min = 1, max = Number.MAX_SAFE_INTEGER, className }: { value: number; onChange: (n: number) => void; min?: number; max?: number; className?: string }) {
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current || Number(text) !== value) setText(String(value));
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <input
+      className={className}
+      type="number"
+      min={min}
+      max={max === Number.MAX_SAFE_INTEGER ? undefined : max}
+      value={text}
+      onFocus={() => (focused.current = true)}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== "" && Number.isFinite(n) && n >= min && n <= max) onChange(n);
+      }}
+      onBlur={() => {
+        focused.current = false;
+        const n = Number(text);
+        const fixed = text.trim() === "" || !Number.isFinite(n) ? value : Math.min(max, Math.max(min, n));
+        setText(String(fixed));
+        if (fixed !== value) onChange(fixed);
+      }}
+    />
+  );
+}
+
 function NumberField({ label, value, onChange, min = 1, hint, suffix }: { label: string; value: number; onChange: (n: number) => void; min?: number; hint?: string; suffix?: string }) {
   return (
     <Labeled label={label} hint={hint}>
       <div className="flex items-center gap-2">
-        <input className="field w-28" type="number" min={min} value={value} onChange={(e) => onChange(Math.max(min, Number(e.target.value) || min))} />
+        <NumberInput className="field w-28" min={min} value={value} onChange={onChange} />
         {suffix && <span className="text-xs text-content-muted">{suffix}</span>}
       </div>
     </Labeled>
@@ -449,8 +531,12 @@ function NumberField({ label, value, onChange, min = 1, hint, suffix }: { label:
 }
 
 function MonitoringSection({ draft, set }: { draft: Settings; set: (p: Partial<Settings>) => void }) {
+  const parseNamespaces = (text: string) => text.split(",").map((s) => s.trim()).filter(Boolean);
   const [excluded, setExcluded] = useState(draft.excludedNamespaces.join(", "));
-  useEffect(() => setExcluded(draft.excludedNamespaces.join(", ")), [draft.excludedNamespaces]);
+  // Follow outside changes (Discard, a reload), but leave what's being typed alone ("a, " is still "a").
+  useEffect(() => {
+    if (!same(parseNamespaces(excluded), draft.excludedNamespaces)) setExcluded(draft.excludedNamespaces.join(", "));
+  }, [draft.excludedNamespaces]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <Section title="Monitoring" description="How often Portside polls, and when it calls something a problem.">
       <div className="grid grid-cols-3 gap-4">
@@ -472,8 +558,11 @@ function MonitoringSection({ draft, set }: { draft: Settings; set: (p: Partial<S
               className="field w-full"
               value={excluded}
               placeholder="e.g. kube-system"
-              onChange={(e) => setExcluded(e.target.value)}
-              onBlur={() => set({ excludedNamespaces: excluded.split(",").map((s) => s.trim()).filter(Boolean) })}
+              onChange={(e) => {
+                setExcluded(e.target.value);
+                set({ excludedNamespaces: parseNamespaces(e.target.value) });
+              }}
+              onBlur={() => setExcluded(draft.excludedNamespaces.join(", "))}
             />
           </Labeled>
         </div>
@@ -577,8 +666,12 @@ function DataSection() {
         <button
           className="btn-ghost"
           onClick={async () => {
-            const n = await ipc.pruneNow();
-            toast.success(`Pruned ${n.toLocaleString()} old log lines`);
+            try {
+              const n = await ipc.pruneNow();
+              toast.success(`Pruned ${n.toLocaleString()} old log lines`);
+            } catch (e) {
+              toast.error(errorMessage(e));
+            }
             void refresh();
           }}
         >
@@ -589,8 +682,12 @@ function DataSection() {
           disabled={!clusterId}
           onClick={async () => {
             if (!(await confirmDestructive("Delete all stored logs, metrics and problem history for this cluster?", "Clear data"))) return;
-            await ipc.clearClusterData();
-            toast.success("Cleared");
+            try {
+              await ipc.clearClusterData();
+              toast.success("Cleared");
+            } catch (e) {
+              toast.error(errorMessage(e));
+            }
             void refresh();
           }}
         >
@@ -628,6 +725,7 @@ function ArchivesSection({ draft, set, saved }: { draft: Settings; set: (p: Part
               const d = await openFile({ multiple: false, directory: true });
               if (typeof d === "string") set({ archiveDir: d });
             }}
+            aria-label="Browse"
           >
             <FolderOpen size={14} />
           </button>

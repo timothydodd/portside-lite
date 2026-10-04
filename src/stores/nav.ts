@@ -53,6 +53,9 @@ interface NavState {
   forward: { namespace: string; service: string } | null;
   /** Volume file browser drawer for a PersistentVolumeClaim. */
   files: { namespace: string; claim: string } | null;
+  /** Asked before leaving the current page (unsaved settings); true = fine to go. */
+  leaveGuard: (() => Promise<boolean>) | null;
+  setLeaveGuard: (g: (() => Promise<boolean>) | null) => void;
   go: (page: Page) => void;
   openLogs: (preset: LogPreset) => void;
   consumeLogPreset: () => LogPreset | null;
@@ -95,7 +98,13 @@ export const useNavStore = create<NavState>((set, get) => ({
   config: null,
   forward: null,
   files: null,
-  go: (page) => set({ page }),
+  leaveGuard: null,
+  setLeaveGuard: (leaveGuard) => set({ leaveGuard }),
+  go: (page) => {
+    const guard = get().leaveGuard;
+    if (!guard || page === get().page) return set({ page });
+    void guard().then((ok) => ok && set({ page, leaveGuard: null }));
+  },
   openLogs: (preset) => set({ page: "logs", logPreset: preset, pod: null, node: null, workload: null, files: null }),
   consumeLogPreset: () => {
     const p = get().logPreset;
@@ -113,7 +122,7 @@ export const useNavStore = create<NavState>((set, get) => ({
   closeArchive: () => set({ archiving: null }),
   openRestore: (a) => set({ restoring: a }),
   closeRestore: () => set({ restoring: null }),
-  openEditor: (t) => set({ editor: t, pod: null, node: null, workload: null, files: null }),
+  openEditor: (t) => set({ editor: t, pod: null, node: null, workload: null, files: null, config: null }),
   closeEditor: () => set({ editor: null }),
   openCopy: (t) => set({ copy: t }),
   closeCopy: () => set({ copy: null }),

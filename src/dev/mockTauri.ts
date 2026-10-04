@@ -260,10 +260,10 @@ const snapshot: ClusterSnapshot = {
     { namespace: "apps", name: "legacy-uploads", phase: "Bound", storageClass: "local-path", capacity: "5Gi", volumeName: "pvc-9a8b", createdMs: now - 90 * 86_400_000, accessModes: ["ReadWriteOnce"], mountedBy: [], usedBy: ["Deployment/legacy-api"], writeBlockers: [] },
   ],
   services: [
-    { namespace: "apps", name: "web-frontend", type: "LoadBalancer", clusterIp: "10.43.12.7", external: ["192.168.1.240"], ports: [{ name: "http", port: 80, targetPort: "8080", nodePort: 31080, protocol: "TCP" }], selector: { app: "web-frontend" }, podsMatched: 2, podsReady: 2, podNames: ["web-frontend-5c8d7f9b4-abcde", "web-frontend-5c8d7f9b4-fghij"], routes: ["shop.lan/ (web)"], createdMs: now - 30 * 86_400_000 },
-    { namespace: "apps", name: "billing-api", type: "ClusterIP", clusterIp: "10.43.40.2", external: [], ports: [{ name: null, port: 8080, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "billing-api" }, podsMatched: 2, podsReady: 1, podNames: ["billing-api-7d9f8b6c5-x2k4p", "billing-api-7d9f8b6c5-q9z1m"], routes: ["shop.lan/api (web)"], createdMs: now - 30 * 86_400_000 },
-    { namespace: "data", name: "postgres", type: "ClusterIP", clusterIp: "10.43.9.9", external: [], ports: [{ name: "pg", port: 5432, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "postgres" }, podsMatched: 0, podsReady: 0, podNames: [], routes: [], createdMs: now - 1 * H },
-    { namespace: "apps", name: "reports", type: "ClusterIP", clusterIp: "10.43.3.3", external: [], ports: [{ name: null, port: 80, targetPort: "8000", nodePort: null, protocol: "TCP" }], selector: { app: "reportz" }, podsMatched: 0, podsReady: 0, podNames: [], routes: [], createdMs: now - 3 * 86_400_000 },
+    { namespace: "apps", name: "web-frontend", type: "LoadBalancer", clusterIp: "10.43.12.7", external: ["192.168.1.240"], ports: [{ name: "http", port: 80, targetPort: "8080", nodePort: 31080, protocol: "TCP" }], selector: { app: "web-frontend" }, podsMatched: 2, idle: false, podsReady: 2, podNames: ["web-frontend-5c8d7f9b4-abcde", "web-frontend-5c8d7f9b4-fghij"], routes: ["shop.lan/ (web)"], createdMs: now - 30 * 86_400_000 },
+    { namespace: "apps", name: "billing-api", type: "ClusterIP", clusterIp: "10.43.40.2", external: [], ports: [{ name: null, port: 8080, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "billing-api" }, podsMatched: 2, idle: false, podsReady: 1, podNames: ["billing-api-7d9f8b6c5-x2k4p", "billing-api-7d9f8b6c5-q9z1m"], routes: ["shop.lan/api (web)"], createdMs: now - 30 * 86_400_000 },
+    { namespace: "data", name: "postgres", type: "ClusterIP", clusterIp: "10.43.9.9", external: [], ports: [{ name: "pg", port: 5432, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "postgres" }, podsMatched: 0, idle: false, podsReady: 0, podNames: [], routes: [], createdMs: now - 1 * H },
+    { namespace: "apps", name: "reports", type: "ClusterIP", clusterIp: "10.43.3.3", external: [], ports: [{ name: null, port: 80, targetPort: "8000", nodePort: null, protocol: "TCP" }], selector: { app: "reportz" }, podsMatched: 0, idle: false, podsReady: 0, podNames: [], routes: [], createdMs: now - 3 * 86_400_000 },
   ],
   configs: [
     { kind: "ConfigMap", namespace: "apps", name: "billing-api-config", secretType: null, keys: ["DB_HOST", "LOG_LEVEL", "app.properties"], sizeBytes: 812, immutable: false, usedBy: ["Deployment/billing-api"], createdMs: now - 30 * 86_400_000 },
@@ -521,6 +521,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
   open_volume_files: (a) => ({ ...mockFileSession(a.namespace as string, a.claim as string) }),
   refresh_volume_files: (a) => mockFileSessions.get(a.id as number),
   close_volume_files: () => null,
+  release_volume_files: () => null,
   list_volume_files: (a) => {
     const path = a.path as string;
     const entries = mockFiles[path];

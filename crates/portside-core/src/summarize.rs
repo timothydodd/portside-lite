@@ -32,6 +32,10 @@ pub struct ClusterObjects {
     pub configmaps: Vec<ConfigMap>,
     pub secrets: Vec<Secret>,
     pub ingresses: Vec<Ingress>,
+    /// Optional kinds whose list failed for a passing reason (not "forbidden"
+    /// or "not served"): their vectors are empty because we don't know, not
+    /// because there are none.
+    pub unknown: Vec<&'static str>,
 }
 
 /// Live usage from metrics.k8s.io, in cores and bytes.
@@ -285,14 +289,27 @@ fn sum_requests(spec: &Option<PodSpec>) -> (f64, f64, f64) {
     let mut cpu = 0.0;
     let mut mem = 0.0;
     let mut mem_lim = 0.0;
+    let mut unlimited = false;
     for c in &spec.containers {
+        let limit = c.resources.as_ref().map_or(0.0, |r| q_mem(&r.limits, "memory"));
+        unlimited |= limit <= 0.0;
+        mem_lim += limit;
         if let Some(r) = &c.resources {
             cpu += q_cpu(&r.requests, "cpu");
             mem += q_mem(&r.requests, "memory");
-            mem_lim += q_mem(&r.limits, "memory");
         }
     }
-    (cpu, mem, mem_lim)
+    // Init containers run one at a time before the others, so the scheduler
+    // reserves whichever is larger: the biggest of them, or the regular sum.
+    for c in spec.init_containers.iter().flatten() {
+        if let Some(r) = &c.resources {
+            cpu = cpu.max(q_cpu(&r.requests, "cpu"));
+            mem = mem.max(q_mem(&r.requests, "memory"));
+        }
+    }
+    // Usage is per pod, so a limit only means something when every container
+    // has one; a sidecar without a limit makes the sum of the others misleading.
+    (cpu, mem, if unlimited { 0.0 } else { mem_lim })
 }
 
 pub fn pod_info(p: &Pod, usage: &UsageMetrics) -> PodInfo {
@@ -619,6 +636,26 @@ fn services_info(objs: &ClusterObjects) -> Vec<ServiceInfo> {
         }
     }
 
+    // Pod labels of workloads that have no pods on purpose: scaled to 0, or
+    // CronJobs (pods only while a run is in progress).
+    type Labels = BTreeMap<String, String>;
+    let mut idle_templates: Vec<(String, Labels)> = Vec::new();
+    let labels_of = |m: Option<&ObjectMeta>| m.and_then(|m| m.labels.clone()).unwrap_or_default();
+    for d in &objs.deployments {
+        if d.spec.as_ref().is_some_and(|s| s.replicas == Some(0)) {
+            idle_templates.push((ns_of(&d.metadata), labels_of(d.spec.as_ref().and_then(|s| s.template.metadata.as_ref()))));
+        }
+    }
+    for st in &objs.statefulsets {
+        if st.spec.as_ref().is_some_and(|s| s.replicas == Some(0)) {
+            idle_templates.push((ns_of(&st.metadata), labels_of(st.spec.as_ref().and_then(|s| s.template.metadata.as_ref()))));
+        }
+    }
+    for c in &objs.cronjobs {
+        let template = c.spec.job_template.spec.as_ref().and_then(|j| j.template.metadata.as_ref());
+        idle_templates.push((ns_of(&c.metadata), labels_of(template)));
+    }
+
     objs.services
         .iter()
         .map(|s| {
@@ -671,6 +708,9 @@ fn services_info(objs: &ClusterObjects) -> Vec<ServiceInfo> {
                         protocol: p.protocol.unwrap_or_else(|| "TCP".into()),
                     })
                     .collect(),
+                idle: matched.is_empty() && idle_templates.iter().any(|(tns, labels)| {
+                    *tns == ns && !selector.is_empty() && selector.iter().all(|(k, v)| labels.get(k) == Some(v))
+                }),
                 pods_ready: matched.iter().filter(|p| pod_is_ready(p)).count(),
                 pods_matched: matched.len(),
                 pod_names: matched.iter().map(|p| name_of(&p.metadata)).collect(),

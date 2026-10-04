@@ -139,6 +139,8 @@ export interface ServiceInfo {
   ports: ServicePort[];
   selector: Record<string, string>;
   podsMatched: number;
+  /** No pods on purpose: its workload is scaled to 0, or it's a CronJob between runs. */
+  idle: boolean;
   podsReady: number;
   podNames: string[];
   routes: string[];
@@ -249,10 +251,12 @@ export interface SshConnection {
   hostKeyFingerprint: string | null;
   /** Sent to sudo on stdin; blank = passwordless sudo (or the SSH password). */
   sudoPassword: string | null;
+  /** Set by the backend to keep two profiles' stored data apart; pass it through untouched. */
+  partition?: string | null;
 }
 
 export type Connection =
-  | { mode: "local"; kubeconfigPath: string | null; context: string | null }
+  | { mode: "local"; kubeconfigPath: string | null; context: string | null; partition?: string | null }
   | ({ mode: "ssh" } & SshConnection);
 
 export interface ConnectionProfile {

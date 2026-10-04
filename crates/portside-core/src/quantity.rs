@@ -12,7 +12,12 @@ pub fn parse_cpu(s: &str) -> f64 {
         b'm' => (&s[..s.len() - 1], 1e-3),
         _ => (s, 1.0),
     };
-    num.parse::<f64>().map(|v| v * scale).unwrap_or(0.0)
+    finite(num.parse::<f64>().map(|v| v * scale))
+}
+
+/// "inf"/"nan" parse as floats; one of those in a sum would poison node totals.
+fn finite(v: Result<f64, std::num::ParseFloatError>) -> f64 {
+    v.ok().filter(|v| v.is_finite()).unwrap_or(0.0)
 }
 
 /// Parse a memory quantity into bytes. Binary suffixes (Ki, Mi, …) are powers
@@ -40,11 +45,11 @@ pub fn parse_memory(s: &str) -> f64 {
     ];
     for (suffix, mult) in SUFFIXES {
         if let Some(num) = s.strip_suffix(suffix) {
-            return num.parse::<f64>().map(|v| v * mult).unwrap_or(0.0);
+            return finite(num.parse::<f64>().map(|v| v * mult));
         }
     }
     // Plain number or exponent form ("1e3").
-    s.parse::<f64>().unwrap_or(0.0)
+    finite(s.parse::<f64>())
 }
 
 #[cfg(test)]
@@ -59,6 +64,9 @@ mod tests {
         assert!((parse_cpu("123456789n") - 0.123456789).abs() < 1e-12);
         assert_eq!(parse_cpu("500u"), 0.0005);
         assert_eq!(parse_cpu("garbage"), 0.0);
+        assert_eq!(parse_cpu("inf"), 0.0);
+        assert_eq!(parse_memory("NaN"), 0.0);
+        assert_eq!(parse_memory("infMi"), 0.0);
     }
 
     #[test]

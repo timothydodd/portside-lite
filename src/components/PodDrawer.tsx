@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileCode2, RefreshCw, RotateCcw, ScrollText, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { runAction } from "../lib/actions";
@@ -224,17 +224,22 @@ function LiveLogs({ namespace, pod, info, previous }: { namespace: string; pod: 
   const [levels, setLevels] = useState<Set<LogLevel>>(new Set());
   const [search, setSearch] = useState("");
 
+  // Only the newest request lands: switching container mid-load must not show the old one's lines.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
     if (!container) return;
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
-      setLines(await ipc.liveLogs(namespace, pod, container, previous, 2000));
+      const l = await ipc.liveLogs(namespace, pod, container, previous, 2000);
+      if (seq === loadSeq.current) setLines(l);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setLines([]);
       setError(errorMessage(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [namespace, pod, container, previous]);
 
@@ -242,9 +247,10 @@ function LiveLogs({ namespace, pod, info, previous }: { namespace: string; pod: 
 
   const rows = useMemo(() => {
     const q = search.toLowerCase();
+    // Keyed by position in the full tail, so the selected line stays selected when the filter changes.
     return lines
-      .filter((l) => (levels.size === 0 || levels.has(l.level)) && (!q || l.message.toLowerCase().includes(q)))
-      .map((l, i) => ({ key: i, ...l }));
+      .map((l, i) => ({ key: i, ...l }))
+      .filter((l) => (levels.size === 0 || levels.has(l.level)) && (!q || l.message.toLowerCase().includes(q)));
   }, [lines, levels, search]);
 
   return (

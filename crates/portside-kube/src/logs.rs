@@ -11,7 +11,9 @@ pub struct LogRequest<'a> {
     pub namespace: &'a str,
     pub pod: &'a str,
     pub container: &'a str,
-    /// Only lines at or after this instant (nanoseconds since epoch).
+    /// The cursor (nanoseconds since epoch). The server only takes whole
+    /// seconds, so lines from the start of this instant's second come back;
+    /// the caller drops the ones at or before the cursor.
     pub since_ns: Option<i64>,
     pub since_seconds: Option<i64>,
     pub tail_lines: Option<i64>,
@@ -23,9 +25,7 @@ pub struct LogRequest<'a> {
 /// Fetch logs with API-server timestamps prefixed on every line.
 pub async fn fetch(client: &Client, req: &LogRequest<'_>) -> Result<String> {
     let api: Api<Pod> = Api::namespaced(client.clone(), req.namespace);
-    let since_time = req
-        .since_ns
-        .and_then(|ns| Timestamp::from_nanosecond(ns as i128).ok());
+    let since_time = req.since_ns.and_then(since_time);
     let lp = LogParams {
         container: Some(req.container.to_string()),
         timestamps: true,
@@ -37,4 +37,24 @@ pub async fn fetch(client: &Client, req: &LogRequest<'_>) -> Result<String> {
         ..Default::default()
     };
     Ok(api.logs(req.pod, &lp).await?)
+}
+
+/// `sinceTime` for a cursor, floored to its second. kube sends whole seconds
+/// and rounds half up, so an unfloored cursor at `…26.7` would ask for `…27`
+/// and the lines in between would never be fetched.
+fn since_time(cursor_ns: i64) -> Option<Timestamp> {
+    Timestamp::from_second(cursor_ns.div_euclid(1_000_000_000)).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn since_time_never_moves_past_the_cursor() {
+        for (cursor_ns, second) in [(26_700_000_000, 26), (26_000_000_000, 26), (26_999_999_999, 26), (-300_000_000, -1)] {
+            let t = since_time(cursor_ns).unwrap();
+            assert_eq!((t.as_second(), t.subsec_nanosecond()), (second, 0), "cursor {cursor_ns}");
+        }
+    }
 }

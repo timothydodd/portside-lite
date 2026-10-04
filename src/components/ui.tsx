@@ -1,6 +1,7 @@
-import { useEffect, type ReactNode } from "react";
-import { AlertOctagon, AlertTriangle, Info, Loader2, Search, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { AlertOctagon, AlertTriangle, Info, Loader2, MoreHorizontal, Search, X } from "lucide-react";
 import type { Severity } from "../lib/types";
+import { isWindows } from "./WindowControls";
 
 // --- severity -----------------------------------------------------------------
 
@@ -188,8 +189,11 @@ export function SortTh<K extends string>({
   sort,
   setSort,
   className = "",
+  text = false,
 }: {
   label: string;
+  /** A text column: the first click sorts A→Z (numbers start with the largest). */
+  text?: boolean;
   k: K;
   sort: { key: K; dir: 1 | -1 };
   setSort: (s: { key: K; dir: 1 | -1 }) => void;
@@ -200,7 +204,7 @@ export function SortTh<K extends string>({
     <th className={className}>
       <button
         className={`inline-flex items-center gap-1 hover:text-content ${active ? "text-content" : ""}`}
-        onClick={() => setSort({ key: k, dir: active ? ((-sort.dir) as 1 | -1) : -1 })}
+        onClick={() => setSort({ key: k, dir: active ? ((-sort.dir) as 1 | -1) : text ? 1 : -1 })}
       >
         {label}
         {active && <span aria-hidden>{sort.dir === 1 ? "▲" : "▼"}</span>}
@@ -209,14 +213,154 @@ export function SortTh<K extends string>({
   );
 }
 
+// --- row actions --------------------------------------------------------------
+
+export interface MenuAction {
+  label: string;
+  icon?: ReactNode;
+  onSelect: () => void;
+  /** Destructive: set apart below a divider, critical color on hover. */
+  danger?: boolean;
+  disabled?: boolean;
+  title?: string;
+}
+
+/**
+ * Row actions behind a "…" button. One or two actions stay as plain icon
+ * buttons (a menu would only add a click); three or more collapse into the
+ * menu. Falsy items are skipped, so callers can write `cond && { … }`.
+ */
+export function ActionMenu({ items, label = "Actions" }: { items: (MenuAction | false | null | undefined)[]; label?: string }) {
+  // Fixed position, so the menu isn't clipped by the scrolling table around it.
+  const [pos, setPos] = useState<CSSProperties | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const shown = items.filter((i): i is MenuAction => !!i);
+  const close = useCallback(() => setPos(null), []);
+  const open = pos != null;
+
+  useEffect(() => {
+    if (!open) return;
+    const enabled = () => Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    menu.current?.focus();
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!menu.current?.contains(t) && !btn.current?.contains(t)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Captured first, so Esc closes the menu and not the drawer behind it.
+        e.stopPropagation();
+        close();
+        btn.current?.focus();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const els = enabled();
+        const i = els.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === "ArrowDown" ? i + 1 : i < 0 ? els.length - 1 : i - 1;
+        els[(next + els.length) % els.length]?.focus();
+      } else if (e.key === "Tab") {
+        close();
+      }
+    };
+    window.addEventListener("mousedown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open, close]);
+
+  const toggle = () => {
+    if (open || !btn.current) return close();
+    const r = btn.current.getBoundingClientRect();
+    const height = shown.length * 32 + 20;
+    const right = Math.max(8, window.innerWidth - r.right);
+    const flip = r.bottom + height > window.innerHeight && r.top > height;
+    setPos(flip ? { right, bottom: window.innerHeight - r.top + 4 } : { right, top: r.bottom + 4 });
+  };
+
+  if (shown.length < 3) {
+    return (
+      <>
+        {shown.map((it) => (
+          <button
+            key={it.label}
+            className={`btn-quiet ${it.danger ? "hover:!text-critical" : ""}`}
+            disabled={it.disabled}
+            title={it.title ?? it.label}
+            aria-label={it.label}
+            onClick={it.onSelect}
+          >
+            {it.icon ?? it.label}
+          </button>
+        ))}
+      </>
+    );
+  }
+  const firstDanger = shown.findIndex((i) => i.danger);
+  return (
+    <>
+      <button
+        ref={btn}
+        className={`btn-quiet ${open ? "bg-muted !text-content" : ""}`}
+        title={label}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <MoreHorizontal size={16} />
+      </button>
+      {open && (
+        <div ref={menu} role="menu" tabIndex={-1} style={{ ...pos, outline: "none" }} className="card fixed z-50 min-w-44 overflow-hidden py-1 text-left shadow-[var(--shadow-md)]">
+          {shown.map((it, i) => (
+            <Fragment key={it.label}>
+              {i === firstDanger && i > 0 && <div className="my-1 border-t border-border-light" />}
+              <button
+                role="menuitem"
+                disabled={it.disabled}
+                title={it.title}
+                className={`flex w-full items-center gap-2 whitespace-nowrap px-3 py-1.5 text-left text-sm text-content-secondary transition-colors hover:bg-muted focus:bg-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 ${it.danger ? "hover:text-critical focus:text-critical" : "hover:text-content focus:text-content"}`}
+                onClick={() => {
+                  close();
+                  it.onSelect();
+                }}
+              >
+                {it.icon && <span className="flex shrink-0 opacity-70">{it.icon}</span>}
+                {it.label}
+              </button>
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // --- overlays -----------------------------------------------------------------
 
-function useEscape(onClose: () => void) {
+// Open overlays in the order they opened. Esc goes to the last one only, so a
+// dialog over a drawer closes by itself and leaves the drawer open.
+const escStack: { current: (() => void) | null }[] = [];
+let escListening = false;
+
+function useEscape(onClose: () => void, enabled = true) {
+  // `null` = takes Esc but does nothing with it (an overlay that only closes by its button).
+  const handler = useRef<(() => void) | null>(null);
+  handler.current = enabled ? onClose : null;
   useEffect(() => {
-    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", h);
-    return () => window.removeEventListener("keydown", h);
-  }, [onClose]);
+    if (!escListening) {
+      escListening = true;
+      window.addEventListener("keydown", (e) => e.key === "Escape" && escStack[escStack.length - 1]?.current?.());
+    }
+    escStack.push(handler);
+    return () => void escStack.splice(escStack.indexOf(handler), 1);
+  }, []);
 }
 
 export function Drawer({
@@ -225,19 +369,26 @@ export function Drawer({
   onClose,
   children,
   actions,
+  wide = false,
+  explicitClose = false,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   onClose: () => void;
   children: ReactNode;
   actions?: ReactNode;
+  /** Nearly the whole window, for content that needs the room (file browser). */
+  wide?: boolean;
+  /** Only the close button closes it: no Esc, no click outside. For work that's easy to lose. */
+  explicitClose?: boolean;
 }) {
-  useEscape(onClose);
+  useEscape(onClose, !explicitClose);
   return (
-    <div className="fixed inset-0 z-40 flex justify-end" onMouseDown={onClose}>
+    // Starts below the custom title bar, so the window can still be moved, minimized and closed.
+    <div className={`fixed inset-x-0 bottom-0 z-40 flex justify-end ${isWindows ? "top-8" : "top-0"}`} onMouseDown={explicitClose ? undefined : onClose}>
       <div className="absolute inset-0 bg-black/30" />
       <aside
-        className="relative flex h-full w-[min(920px,92vw)] flex-col border-l border-border bg-surface shadow-[var(--shadow-md)]"
+        className={`relative flex h-full flex-col ${wide ? "w-[min(1440px,96vw)]" : "w-[min(920px,92vw)]"} border-l border-border bg-surface shadow-[var(--shadow-md)]`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header className="flex items-start justify-between gap-3 border-b border-border-light px-5 py-3">
@@ -247,7 +398,7 @@ export function Drawer({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {actions}
-            <button className="btn-quiet" onClick={onClose} title="Close (Esc)">
+            <button className="btn-quiet" onClick={onClose} title={explicitClose ? "Close" : "Close (Esc)"}>
               <X size={16} />
             </button>
           </div>
@@ -263,15 +414,21 @@ export function Modal({
   onClose,
   children,
   wide = false,
+  explicitClose = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** Only its own buttons close it: no Esc, no click outside. For input or results that are easy to lose. */
+  explicitClose?: boolean;
 }) {
-  useEscape(onClose);
+  useEscape(onClose, !explicitClose);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onMouseDown={onClose}>
+    <div
+      className={`fixed inset-x-0 bottom-0 z-50 flex items-center justify-center bg-black/40 ${isWindows ? "top-8" : "top-0"}`}
+      onMouseDown={explicitClose ? undefined : onClose}
+    >
       <div
         className={`card max-h-[90vh] overflow-auto p-5 shadow-[var(--shadow-md)] ${wide ? "w-[min(640px,94vw)]" : "w-[380px]"}`}
         onMouseDown={(e) => e.stopPropagation()}

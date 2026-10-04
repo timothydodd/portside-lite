@@ -2,7 +2,7 @@
 export function fmtCpu(cores: number | null | undefined): string {
   if (cores == null) return "—";
   if (cores === 0) return "0";
-  if (cores < 1) return `${Math.round(cores * 1000)}m`;
+  if (cores < 0.9995) return `${Math.round(cores * 1000)}m`; // above that it would read "1000m"
   return cores.toFixed(cores >= 10 ? 0 : 2);
 }
 
@@ -12,11 +12,12 @@ export function fmtBytes(bytes: number | null | undefined): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let v = bytes;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
+  // Step up a unit once the rounded value would read 1024 (e.g. "1024 KiB").
+  while (Math.round(v) >= 1024 && i < units.length - 1) {
     v /= 1024;
     i++;
   }
-  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  return `${v >= 99.95 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
 export function fmtPct(v: number | null | undefined): string {
@@ -32,7 +33,7 @@ export function pct(part: number | null | undefined, whole: number): number | nu
 /** Compact counts: 1,284 / 12.9K / 4.2M. */
 export function fmtCount(n: number): string {
   if (n < 10_000) return n.toLocaleString();
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
+  if (n < 999_950) return `${(n / 1000).toFixed(1)}K`; // above that it would read "1000.0K"
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 

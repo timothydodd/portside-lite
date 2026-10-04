@@ -21,6 +21,9 @@ pub const MOUNT: &str = "/data";
 pub const HELPER_LABEL: &str = "portside-lite/files";
 /// Annotation on a helper pod naming the claim it mounts.
 pub const CLAIM_ANNOTATION: &str = "portside-lite/claim";
+/// Annotation naming the app install that started a helper, so a later run
+/// can clear up what an earlier one (crashed or killed) left behind.
+pub const OWNER_ANNOTATION: &str = "portside-lite/owner";
 /// A helper exits on its own after this long, so a crash can't leave the
 /// volume attached forever.
 pub const HELPER_LIFETIME_SECS: u64 = 2 * 60 * 60;
@@ -61,10 +64,11 @@ pub struct ClaimUsers {
 // --- paths ---------------------------------------------------------------------
 
 /// Clean a path relative to the volume root: no `..`/`.` parts, no NUL,
-/// surrounding and doubled slashes dropped. "" is the root.
+/// surrounding and doubled slashes dropped. "" is the root. Only `/`
+/// separates: a backslash is an ordinary character in a Linux file name.
 pub fn clean_rel(path: &str) -> Result<String, String> {
     let mut parts = Vec::new();
-    for part in path.split(['/', '\\']) {
+    for part in path.split('/') {
         match part {
             "" => {}
             "." | ".." => return Err(format!("\"{path}\" isn't allowed: paths can't contain . or ..")),
@@ -218,21 +222,35 @@ fn kind_of(stat_type: &str) -> &'static str {
     }
 }
 
-/// Parse the output of [`list_command`]. Unparseable lines (a name with a
-/// newline in it) are skipped. Folders first, then by name.
+/// Parse the output of [`list_command`]. A name with a newline in it spills
+/// onto a line of its own; that entry is dropped (half a name would point at
+/// nothing, or at another file). Folders first, then by name.
 pub fn parse_listing(path: &str, out: &str) -> FileListing {
-    let (body, df) = out.split_once("##df\n").unwrap_or((out, ""));
+    // The marker is its own line and comes last; a file name may contain the same text.
+    let (body, df) = match out.rfind("\n##df\n") {
+        Some(i) => (&out[..i + 1], &out[i + 6..]),
+        None => out.strip_prefix("##df\n").map_or((out, ""), |df| ("", df)),
+    };
     let mut entries = Vec::new();
     let mut dir_links = std::collections::HashSet::new();
+    let mut after_entry = false;
     for line in body.lines() {
         if let Some(name) = line.strip_prefix("L|") {
             dir_links.insert(name.to_string());
+            after_entry = false;
             continue;
         }
-        let Some(rest) = line.strip_prefix("F|") else { continue };
+        let Some(rest) = line.strip_prefix("F|") else {
+            if std::mem::take(&mut after_entry) {
+                entries.pop();
+            }
+            continue;
+        };
+        after_entry = false;
         let mut it = rest.splitn(4, '|');
         let (Some(size), Some(mtime), Some(t), Some(name)) = (it.next(), it.next(), it.next(), it.next()) else { continue };
         let Ok(size) = size.parse::<u64>() else { continue };
+        after_entry = true;
         entries.push(FileEntry {
             name: name.to_string(),
             kind: kind_of(t).to_string(),
@@ -267,7 +285,7 @@ fn parse_df(line: &str) -> (Option<u64>, Option<u64>) {
 /// The helper pod. `node` pins it next to a pod that already has the volume
 /// attached (needed for ReadWriteOnce on most storage); `read_only` mounts
 /// the claim read-only.
-pub fn helper_pod(namespace: &str, claim: &str, image: &str, node: Option<&str>, read_only: bool) -> Pod {
+pub fn helper_pod(namespace: &str, claim: &str, image: &str, node: Option<&str>, read_only: bool, owner: &str) -> Pod {
     let mut spec = serde_json::json!({
         "restartPolicy": "Never",
         "activeDeadlineSeconds": HELPER_LIFETIME_SECS + 60,
@@ -298,7 +316,7 @@ pub fn helper_pod(namespace: &str, claim: &str, image: &str, node: Option<&str>,
             "generateName": "portside-files-",
             "namespace": namespace,
             "labels": { HELPER_LABEL: "true", "app.kubernetes.io/managed-by": "portside-lite" },
-            "annotations": { CLAIM_ANNOTATION: claim }
+            "annotations": { CLAIM_ANNOTATION: claim, OWNER_ANNOTATION: owner }
         },
         "spec": spec
     }))
@@ -307,6 +325,10 @@ pub fn helper_pod(namespace: &str, claim: &str, image: &str, node: Option<&str>,
 
 pub fn is_helper(p: &Pod) -> bool {
     p.metadata.labels.as_ref().and_then(|l| l.get(HELPER_LABEL)).map(String::as_str) == Some("true")
+}
+
+pub fn helper_owner(p: &Pod) -> Option<&str> {
+    p.metadata.annotations.as_ref()?.get(OWNER_ANNOTATION).map(String::as_str)
 }
 
 pub fn helper_claim(p: &Pod) -> Option<&str> {
@@ -449,7 +471,7 @@ mod tests {
     fn paths_are_cleaned_and_confined() {
         assert_eq!(clean_rel("").unwrap(), "");
         assert_eq!(clean_rel("/a//b/").unwrap(), "a/b");
-        assert_eq!(clean_rel("a\\b").unwrap(), "a/b");
+        assert_eq!(clean_rel("dir/a\\b").unwrap(), "dir/a\\b", "a backslash is part of the name");
         assert!(clean_rel("a/../b").is_err());
         assert!(clean_rel("./a").is_err());
         assert_eq!(abs(""), "/data");
@@ -481,11 +503,18 @@ mod tests {
                    F|7|1700000300|symbolic link|dangling\n\
                    L|current\n\
                    garbage line\n\
+                   F|3|1700000400|regular file|notes##df\n\
+                   F|5|1700000500|regular file|two\n\
+                   lines.txt\n\
                    ##df\n\
                    /dev/sda1 1000 400 600 40% /data\n";
         let l = parse_listing("x", out);
         let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["current", "logs", "A.txt", "b|pipe.txt", "dangling"], "folders (and links to them) first");
+        assert_eq!(
+            names,
+            ["current", "logs", "A.txt", "b|pipe.txt", "dangling", "notes##df"],
+            "folders (and links to them) first; the name with a newline is dropped"
+        );
         assert!(l.entries[0].link_to_dir);
         assert_eq!(l.entries[2].kind, "file");
         assert_eq!(l.entries[3].size, 12);
@@ -532,14 +561,15 @@ mod tests {
 
     #[test]
     fn helper_pod_spec() {
-        let p = helper_pod("apps", "data", "busybox:1.37", Some("n1"), true);
+        let p = helper_pod("apps", "data", "busybox:1.37", Some("n1"), true, "me");
+        assert_eq!(helper_owner(&p), Some("me"));
         assert!(is_helper(&p));
         assert_eq!(helper_claim(&p), Some("data"));
         let spec = p.spec.unwrap();
         assert_eq!(spec.node_name.as_deref(), Some("n1"));
         assert_eq!(spec.containers[0].volume_mounts.as_ref().unwrap()[0].read_only, Some(true));
         assert_eq!(spec.volumes.unwrap()[0].persistent_volume_claim.as_ref().unwrap().read_only, Some(true));
-        let rw = helper_pod("apps", "data", "busybox:1.37", None, false).spec.unwrap();
+        let rw = helper_pod("apps", "data", "busybox:1.37", None, false, "me").spec.unwrap();
         assert!(rw.node_name.is_none());
         assert_eq!(rw.containers[0].volume_mounts.as_ref().unwrap()[0].read_only, Some(false));
     }

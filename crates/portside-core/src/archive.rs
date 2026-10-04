@@ -68,8 +68,16 @@ fn safe_segment(s: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
         .collect();
-    match out.trim_matches('.') {
+    // Long enough for any real name with room for the `<kind>-` prefix under
+    // the usual 255-byte limit.
+    let out: String = out.trim_matches('.').chars().take(200).collect();
+    // Windows won't create these as a file or folder, with or without an extension.
+    let stem = out.split('.').next().unwrap_or_default().to_ascii_lowercase();
+    let reserved = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit() && c != '0'));
+    match out.as_str() {
         "" => "_".into(),
+        t if reserved => format!("_{t}"),
         t => t.to_string(),
     }
 }
@@ -92,8 +100,11 @@ pub fn valid_archive_id(id: &str) -> bool {
     parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && *p == safe_segment(p) && *p != "." && *p != "..")
 }
 
-fn is_suffix(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+/// The random part of a generated name (ReplicaSet hash, pod suffix).
+/// Kubernetes draws these from an alphabet with no vowels and no 0/1/3, so
+/// they never spell words: `web-worker-x2k4p` is not a pod of Deployment `web`.
+fn is_generated(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b"bcdfghjklmnpqrstvwxz2456789".contains(&b))
 }
 
 fn is_digits(s: &str) -> bool {
@@ -108,10 +119,10 @@ pub fn pod_name_matches(kind: &str, workload: &str, pod: &str) -> bool {
     let Some(rest) = pod.strip_prefix(workload).and_then(|r| r.strip_prefix('-')) else { return false };
     let parts: Vec<&str> = rest.split('-').collect();
     match (kind, parts.as_slice()) {
-        ("Deployment", [hash, id]) => is_suffix(hash) && hash.len() <= 10 && is_suffix(id) && id.len() == 5,
+        ("Deployment", [hash, id]) => is_generated(hash) && hash.len() <= 10 && is_generated(id) && id.len() == 5,
         ("StatefulSet", [ordinal]) => is_digits(ordinal),
-        ("DaemonSet" | "Job", [id]) => is_suffix(id) && id.len() == 5,
-        ("CronJob", [ts, id]) => is_digits(ts) && is_suffix(id) && id.len() == 5,
+        ("DaemonSet" | "Job", [id]) => is_generated(id) && id.len() == 5,
+        ("CronJob", [ts, id]) => is_digits(ts) && is_generated(id) && id.len() == 5,
         _ => false,
     }
 }
@@ -232,8 +243,12 @@ mod tests {
         assert!(pod_name_matches("StatefulSet", "db", "db-12"));
         assert!(!pod_name_matches("StatefulSet", "db", "db-replica-0"));
         assert!(pod_name_matches("DaemonSet", "agent", "agent-q8z7w"));
-        assert!(pod_name_matches("CronJob", "backup", "backup-29012345-abcde"));
-        assert!(!pod_name_matches("CronJob", "backup", "backup-abcde"));
+        assert!(pod_name_matches("CronJob", "backup", "backup-29012345-bcdfg"));
+        assert!(!pod_name_matches("CronJob", "backup", "backup-bcdfg"));
+        assert!(!pod_name_matches("Deployment", "web", "web-worker-x2k4p"), "that's a pod of something named web-worker");
+        assert_eq!(archive_id("c", "con", "Deployment", "nul.txt"), "c/_con/deployment-_nul.txt");
+        assert!(valid_archive_id("c/_con/deployment-web"));
+        assert_eq!(archive_id("c", "ns", "Job", &"x".repeat(253)).len(), "c/ns/job-".len() + 200);
         assert!(!pod_name_matches("Deployment", "web", "webx-7d9f8b6c5-x2k4p"));
     }
 

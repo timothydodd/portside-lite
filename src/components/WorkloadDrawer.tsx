@@ -7,6 +7,7 @@ import type { ArchiveMeta, LogSource, PodInfo, WorkloadInfo } from "../lib/types
 import { podsOf, workloadHealth } from "../lib/workloads";
 import { findArchive, useArchivesStore } from "../stores/archives";
 import { useClusterStore } from "../stores/cluster";
+import { confirmLeaveFiles, useFilesStore } from "../stores/files";
 import { useNavStore, type WorkloadTab } from "../stores/nav";
 import { toast } from "../stores/toast";
 import IssueCard from "./IssueCard";
@@ -57,7 +58,11 @@ export default function WorkloadDrawer() {
     ? undefined
     : snapshot?.workloads.find((x) => x.kind === target.kind && x.namespace === target.namespace && x.name === target.name);
   const archive = target.archiveId ? archives?.find((a) => a.id === target.archiveId) : findArchive(archives, clusterId, target);
-  const setTab = (tab: WorkloadTab) => openWorkload(target, tab);
+  // The Files tab gets the room and the close guard of the standalone file browser.
+  const onFiles = target.tab === "files";
+  /** Anything that takes this drawer (or its Files tab) away asks first while a transfer runs. */
+  const leave = (go: () => void) => void confirmLeaveFiles().then((ok) => ok && go());
+  const setTab = (tab: WorkloadTab) => leave(() => openWorkload(target, tab));
   const logsHere = !otherCluster; // stored logs are per cluster
   const ref = { kind: target.kind, namespace: target.namespace, name: target.name };
 
@@ -70,14 +75,16 @@ export default function WorkloadDrawer() {
           {w ? workloadHealth(w).label : archive ? `archived ${fmtAgo(archive.archivedMs)}` : "not on the cluster"}
         </>
       }
-      onClose={closeWorkload}
+      wide={onFiles}
+      explicitClose={onFiles}
+      onClose={() => leave(closeWorkload)}
       actions={
         <>
-          <button className="btn-ghost" onClick={() => openLogs({ namespace: target.namespace, workload: { kind: target.kind, name: target.name } })} title="Search every pod's stored logs in the Log explorer">
+          <button className="btn-ghost" onClick={() => leave(() => openLogs({ namespace: target.namespace, workload: { kind: target.kind, name: target.name } }))} title="Search every pod's stored logs in the Log explorer">
             <ScrollText size={14} /> Log explorer
           </button>
           {w && (
-            <button className="btn-ghost" onClick={() => openEditor(ref)} title="Edit YAML">
+            <button className="btn-ghost" onClick={() => leave(() => openEditor(ref))} title="Edit YAML">
               <FileCode2 size={14} /> Edit
             </button>
           )}
@@ -230,8 +237,8 @@ function Overview({
         <section>
           <h3 className="card-title mb-2">Images</h3>
           <div className="flex flex-col gap-1">
-            {(w?.images ?? archive?.images ?? []).map((img) => (
-              <span key={img} className="mono truncate text-content-secondary" title={img}>{img}</span>
+            {(w?.images ?? archive?.images ?? []).map((img, i) => (
+              <span key={i} className="mono truncate text-content-secondary" title={img}>{img}</span>
             ))}
           </div>
         </section>
@@ -353,13 +360,14 @@ export function ArchiveBanner({ archive }: { archive: ArchiveMeta }) {
 /** The file browser for one of the workload's claims. */
 function WorkloadFiles({ namespace, claims }: { namespace: string; claims: string[] }) {
   const [claim, setClaim] = useState(claims[0]);
+  const transferring = useFilesStore((s) => s.transferring);
   const current = claims.includes(claim) ? claim : claims[0];
   return (
     <div className="flex h-full flex-col">
       {claims.length > 1 && (
         <div className="flex shrink-0 items-center gap-2 border-b border-border-light px-4 py-2 text-xs text-content-secondary">
           Volume
-          <select className="field" value={current} onChange={(e) => setClaim(e.target.value)}>
+          <select className="field" disabled={transferring} value={current} onChange={(e) => setClaim(e.target.value)}>
             {claims.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -367,7 +375,7 @@ function WorkloadFiles({ namespace, claims }: { namespace: string; claims: strin
         </div>
       )}
       <div className="min-h-0 flex-1">
-        <FileBrowser namespace={namespace} claim={current} />
+        <FileBrowser key={current} namespace={namespace} claim={current} />
       </div>
     </div>
   );

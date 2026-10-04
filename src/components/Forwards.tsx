@@ -50,7 +50,7 @@ export function ForwardDialog() {
   const [started, setStarted] = useState<ForwardInfo | null>(null);
 
   useEffect(() => {
-    setPort(svc?.ports[0]?.port ?? null);
+    setPort(svc?.ports.find((p) => p.protocol === "TCP")?.port ?? null);
     setLocal("");
     setError(null);
     setStarted(null);
@@ -87,7 +87,7 @@ export function ForwardDialog() {
             <button className="btn-primary" onClick={() => void open(forwardUrl(started, portName))}>
               <ExternalLink size={14} /> Open {forwardUrl(started, portName)}
             </button>
-            <button className="btn-ghost" onClick={() => void copy(`localhost:${started.localPort}`)}>
+            <button className="btn-ghost" title="Copy address" aria-label="Copy address" onClick={() => void copy(`localhost:${started.localPort}`)}>
               <Copy size={14} />
             </button>
           </div>

@@ -21,25 +21,31 @@ fn other(msg: impl Into<String>) -> KubeError {
     KubeError::Other(msg.into())
 }
 
-/// (group, version) for the kinds the UI works with.
-fn group_version(kind: &str) -> (&'static str, &'static str) {
-    match kind {
+/// (group, version) for the kinds the UI works with. A kind that isn't
+/// listed is refused rather than assumed to be a core one.
+fn group_version(kind: &str) -> Result<(&'static str, &'static str)> {
+    Ok(match kind {
         "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" => ("apps", "v1"),
         "Job" | "CronJob" => ("batch", "v1"),
         "Ingress" => ("networking.k8s.io", "v1"),
         "HorizontalPodAutoscaler" => ("autoscaling", "v2"),
-        _ => ("", "v1"), // Pod, Service, ConfigMap, Secret, PVC, ServiceAccount, Namespace, Node
-    }
+        "Pod" | "Service" | "ConfigMap" | "Secret" | "PersistentVolumeClaim" | "PersistentVolume" | "ServiceAccount" | "Namespace"
+        | "Node" | "Event" | "Endpoints" => ("", "v1"),
+        _ => return Err(other(format!("{kind} objects aren't handled here"))),
+    })
 }
 
 async fn resolve(client: &Client, gvk: &GroupVersionKind) -> Result<(ApiResource, ApiCapabilities)> {
-    discovery::pinned_kind(client, gvk)
-        .await
-        .map_err(|e| other(format!("unknown kind {}/{}: {e}", gvk.api_version(), gvk.kind)))
+    discovery::pinned_kind(client, gvk).await.map_err(|e| match e {
+        // The server answered: it doesn't serve this kind.
+        kube::Error::Api(_) | kube::Error::Discovery(_) => other(format!("unknown kind {}/{}: {e}", gvk.api_version(), gvk.kind)),
+        // It didn't answer; that says nothing about the kind.
+        e => KubeError::from(e),
+    })
 }
 
 pub(crate) async fn api_for_kind(client: &Client, kind: &str, namespace: Option<&str>) -> Result<(Api<DynamicObject>, ApiResource)> {
-    let (g, v) = group_version(kind);
+    let (g, v) = group_version(kind)?;
     let (ar, caps) = resolve(client, &GroupVersionKind::gvk(g, v, kind)).await?;
     let api = match (caps.scope, namespace) {
         (Scope::Namespaced, Some(ns)) => Api::namespaced_with(client.clone(), ns, &ar),
@@ -112,18 +118,10 @@ pub async fn apply_edit(
         return Err(other("The editor holds one object; remove the extra `---` documents."));
     }
     let obj: DynamicObject = serde_yaml::from_str(yaml).map_err(|e| other(format!("Invalid YAML: {e}")))?;
+    check_edit(&obj, expected_kind, expected_namespace, expected_name).map_err(other)?;
     let types = obj.types.clone().ok_or_else(|| other("apiVersion and kind are required"))?;
-    let name = obj.metadata.name.clone().ok_or_else(|| other("metadata.name is required"))?;
-    if types.kind != expected_kind {
-        return Err(other(format!("kind changed from {expected_kind} to {} — that would be a different object", types.kind)));
-    }
-    if name != expected_name {
-        return Err(other(format!("metadata.name changed from {expected_name} to {name} — renaming isn't supported (export and copy instead)")));
-    }
+    let name = expected_name.to_string();
     let ns = obj.metadata.namespace.clone();
-    if expected_namespace.is_some() && ns.as_deref() != expected_namespace {
-        return Err(other("metadata.namespace can't be changed here — use Copy to cluster to move it"));
-    }
 
     let gvk = GroupVersionKind::try_from(&types).map_err(|e| other(e.to_string()))?;
     let (ar, caps) = resolve(client, &gvk).await?;
@@ -146,23 +144,53 @@ pub async fn apply_edit(
     ))
 }
 
-/// Every object in the namespace as JSON, or empty if the kind isn't served
-/// or listing is forbidden.
-pub(crate) async fn list_values(client: &Client, kind: &str, namespace: &str) -> Vec<Value> {
-    let Ok((api, ar)) = api_for_kind(client, kind, Some(namespace)).await else { return Vec::new() };
-    let Ok(list) = api.list(&ListParams::default()).await else { return Vec::new() };
-    list.items.into_iter().filter_map(|o| to_value(o, &ar).ok()).collect()
+/// What an edit must keep: the identity it was opened with, and the
+/// `resourceVersion` it was loaded at (without it, replace overwrites
+/// whatever is on the cluster instead of failing with a conflict).
+fn check_edit(obj: &DynamicObject, expected_kind: &str, expected_namespace: Option<&str>, expected_name: &str) -> std::result::Result<(), String> {
+    let types = obj.types.as_ref().ok_or("apiVersion and kind are required")?;
+    let name = obj.metadata.name.as_deref().ok_or("metadata.name is required")?;
+    if types.kind != expected_kind {
+        return Err(format!("kind changed from {expected_kind} to {} — that would be a different object", types.kind));
+    }
+    if name != expected_name {
+        return Err(format!("metadata.name changed from {expected_name} to {name} — renaming isn't supported (export and copy instead)"));
+    }
+    if obj.metadata.namespace.as_deref() != expected_namespace {
+        return Err("metadata.namespace can't be changed here — use Copy to cluster to move it".into());
+    }
+    if obj.metadata.resource_version.as_deref().is_none_or(str::is_empty) {
+        return Err("metadata.resourceVersion is missing. It's how the save notices that someone else changed the object; reload to get it back, then reapply your edit.".into());
+    }
+    Ok(())
+}
+
+/// Every object in the namespace as JSON. Empty if the kind isn't served or
+/// listing is forbidden; any other failure is an error, because callers take
+/// "empty" to mean "nothing else uses this" when deciding what's safe to remove.
+pub(crate) async fn list_values(client: &Client, kind: &str, namespace: &str) -> Result<Vec<Value>> {
+    let settled = |e: &KubeError| matches!(e, KubeError::Other(_)) || matches!(e.api_status(), Some(403 | 404));
+    let (api, ar) = match api_for_kind(client, kind, Some(namespace)).await {
+        Ok(found) => found,
+        Err(e) if settled(&e) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    match api.list(&ListParams::default()).await.map_err(KubeError::from) {
+        Ok(list) => Ok(list.items.into_iter().filter_map(|o| to_value(o, &ar).ok()).collect()),
+        Err(e) if settled(&e) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// What belongs with a workload when exporting or copying it: pod-spec
 /// references, Services selecting its pods, Ingresses routing to them, HPAs.
 pub async fn related(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<Vec<RelatedRef>> {
     let workload = get_value(client, kind, Some(namespace), name).await?;
-    let (services, ingresses, hpas) = futures::join!(
+    let (services, ingresses, hpas) = futures::try_join!(
         list_values(client, "Service", namespace),
         list_values(client, "Ingress", namespace),
         list_values(client, "HorizontalPodAutoscaler", namespace),
-    );
+    )?;
     let mut present = std::collections::HashSet::new();
     for r in references(&workload) {
         if let Ok((api, _)) = api_for_kind(client, &r.kind, Some(namespace)).await {
@@ -355,4 +383,23 @@ pub async fn import_docs(
         });
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_keep_identity_and_resource_version() {
+        let obj = |yaml: &str| serde_yaml::from_str::<DynamicObject>(yaml).unwrap();
+        let ok = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: apps\n  resourceVersion: \"42\"\n";
+        assert!(check_edit(&obj(ok), "Deployment", Some("apps"), "web").is_ok());
+        let err = |yaml: &str, ns| check_edit(&obj(yaml), "Deployment", ns, "web").unwrap_err();
+        assert!(err(&ok.replace("  resourceVersion: \"42\"\n", ""), Some("apps")).contains("resourceVersion"));
+        assert!(err(&ok.replace("\"42\"", "\"\""), Some("apps")).contains("resourceVersion"));
+        assert!(err(&ok.replace("name: web", "name: api"), Some("apps")).contains("metadata.name"));
+        assert!(err(&ok.replace("kind: Deployment", "kind: StatefulSet"), Some("apps")).contains("kind changed"));
+        assert!(err(&ok.replace("namespace: apps", "namespace: prod"), Some("apps")).contains("namespace"));
+        assert!(err(ok, None).contains("namespace"), "a cluster-scoped target can't gain a namespace");
+    }
 }

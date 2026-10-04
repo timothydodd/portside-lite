@@ -205,6 +205,9 @@ pub struct ServiceInfo {
     pub selector: std::collections::BTreeMap<String, String>,
     /// Pods the selector matches (running, not terminating).
     pub pods_matched: usize,
+    /// No pods on purpose: the selector matches a workload scaled to 0, or a
+    /// CronJob between runs.
+    pub idle: bool,
     /// Of those, pods that are Ready (receiving traffic).
     pub pods_ready: usize,
     pub pod_names: Vec<String>,

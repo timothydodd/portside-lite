@@ -10,6 +10,9 @@ pub enum Connection {
     Local {
         kubeconfig_path: Option<String>,
         context: Option<String>,
+        /// See [`SshConnection::partition`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partition: Option<String>,
     },
     /// SSH into a k3s server node, read its kubeconfig and tunnel the API
     /// server port over the SSH connection.
@@ -41,6 +44,11 @@ pub struct SshConnection {
     /// to the SSH login password when unset.
     #[serde(default)]
     pub sudo_password: Option<String>,
+    /// Set by `Settings::normalize` when another profile would otherwise get
+    /// the same cluster id for a different cluster; keeps their stored data
+    /// apart. Never shown or edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
 }
 
 impl SshConnection {
@@ -82,12 +90,52 @@ fn default_api_port() -> u16 {
 impl Connection {
     /// Stable identifier used to partition stored samples/logs per cluster.
     pub fn cluster_id(&self) -> String {
-        match self {
+        let base = match self {
             Connection::Local { context, .. } => {
                 format!("local:{}", context.as_deref().unwrap_or("default"))
             }
             Connection::Ssh(s) => format!("ssh:{}@{}:{}", s.username, s.host, s.port),
+        };
+        match self.partition() {
+            Some(p) => format!("{base}#{p}"),
+            None => base,
         }
+    }
+
+    fn partition(&self) -> Option<&str> {
+        match self {
+            Connection::Local { partition, .. } => partition.as_deref(),
+            Connection::Ssh(s) => s.partition.as_deref(),
+        }
+    }
+
+    fn partition_mut(&mut self) -> &mut Option<String> {
+        match self {
+            Connection::Local { partition, .. } => partition,
+            Connection::Ssh(s) => &mut s.partition,
+        }
+    }
+
+    /// The parts of the target the cluster id leaves out: two connections with
+    /// the same id that differ here are different clusters.
+    fn id_blind_spot(&self) -> (Option<&str>, u16) {
+        match self {
+            Connection::Local { kubeconfig_path, .. } => (kubeconfig_path.as_deref().filter(|p| !p.is_empty()), 0),
+            Connection::Ssh(s) => (Some(s.api_host.as_str()), s.api_port),
+        }
+    }
+
+    /// Same cluster, reached the same way. A host key pinned after connecting
+    /// doesn't make it a different connection.
+    pub fn same_endpoint(&self, other: &Connection) -> bool {
+        let unpinned = |c: &Connection| {
+            let mut c = c.clone();
+            if let Connection::Ssh(s) = &mut c {
+                s.host_key_fingerprint = None;
+            }
+            c
+        };
+        unpinned(self) == unpinned(other)
     }
 }
 
@@ -187,8 +235,22 @@ impl Settings {
         self.active_profile().map(|p| &p.connection)
     }
 
-    /// Fold a legacy single `connection` into a profile, and keep the active
-    /// id pointing at an existing profile (first one if it dangles).
+    /// A partition is assigned once and then stays, even if the UI sends the
+    /// profile back without it (e.g. after switching its mode and back).
+    pub fn keep_partitions(&mut self, prev: &Settings) {
+        for p in &mut self.connections {
+            if p.connection.partition().is_none() {
+                if let Some(old) = prev.connections.iter().find(|o| o.id == p.id).and_then(|o| o.connection.partition()) {
+                    *p.connection.partition_mut() = Some(old.to_string());
+                }
+            }
+        }
+    }
+
+    /// Fold a legacy single `connection` into a profile, keep the active id
+    /// pointing at an existing profile (first one if it dangles), and give a
+    /// profile its own partition when its cluster id would collide with an
+    /// earlier profile for a different cluster.
     pub fn normalize(&mut self) {
         if let Some(legacy) = self.connection.take() {
             if self.connections.is_empty() {
@@ -199,12 +261,43 @@ impl Settings {
                 self.connections.push(ConnectionProfile { id: "default".into(), name, connection: legacy });
             }
         }
+        // Profiles are looked up by id, so a blank or repeated one would hide a profile.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..self.connections.len() {
+            let wanted = match self.connections[i].id.trim() {
+                "" => "profile".to_string(),
+                id => id.to_string(),
+            };
+            let mut id = wanted.clone();
+            let mut n = 2;
+            while !seen.insert(id.clone()) {
+                id = format!("{wanted}-{n}");
+                n += 1;
+            }
+            self.connections[i].id = id;
+        }
+        // Below these the loops spin or the API rejects the request.
+        self.poll_interval_secs = self.poll_interval_secs.max(5);
+        self.log_interval_secs = self.log_interval_secs.max(10);
+        self.initial_log_lookback_hours = self.initial_log_lookback_hours.max(1);
+        self.retention_days = self.retention_days.max(1);
         let valid = self
             .active_connection_id
             .as_deref()
             .is_some_and(|id| self.connections.iter().any(|p| p.id == id));
         if !valid {
             self.active_connection_id = self.connections.first().map(|p| p.id.clone());
+        }
+        for i in 1..self.connections.len() {
+            let (earlier, rest) = self.connections.split_at_mut(i);
+            let p = &mut rest[0];
+            let id = p.connection.cluster_id();
+            let clash = earlier
+                .iter()
+                .any(|e| e.connection.cluster_id() == id && e.connection.id_blind_spot() != p.connection.id_blind_spot());
+            if clash {
+                *p.connection.partition_mut() = Some(p.id.clone());
+            }
         }
         if self.files_helper_image.trim().is_empty() {
             self.files_helper_image = DEFAULT_FILES_HELPER_IMAGE.into();
@@ -224,6 +317,62 @@ mod tests {
         assert_eq!(s.port, 22);
         assert_eq!(s.api_port, 6443);
         assert_eq!(c.cluster_id(), "ssh:u@h:22");
+    }
+
+    fn local(id: &str, path: Option<&str>) -> ConnectionProfile {
+        ConnectionProfile {
+            id: id.into(),
+            name: id.into(),
+            connection: Connection::Local { kubeconfig_path: path.map(Into::into), context: None, partition: None },
+        }
+    }
+
+    #[test]
+    fn colliding_profiles_get_their_own_partition() {
+        let mut s = Settings::default();
+        s.connections = vec![local("a", Some("/k/one.yaml")), local("b", Some("/k/two.yaml")), local("c", Some("/k/one.yaml"))];
+        s.normalize();
+        let ids: Vec<String> = s.connections.iter().map(|p| p.connection.cluster_id()).collect();
+        assert_eq!(ids, ["local:default", "local:default#b", "local:default"], "first keeps its id; same file = same cluster");
+
+        // Stable across saves, including one where the UI dropped the field.
+        let mut next = s.clone();
+        next.connections[1] = local("b", Some("/k/two.yaml"));
+        next.connections.remove(0);
+        next.keep_partitions(&s);
+        next.normalize();
+        assert_eq!(next.connections[0].connection.cluster_id(), "local:default#b");
+
+        // Old settings without the field still load, and the field isn't written when unset.
+        let json = serde_json::to_string(&local("a", None).connection).unwrap();
+        assert!(!json.contains("partition"));
+        assert_eq!(serde_json::from_str::<Connection>(&json).unwrap().cluster_id(), "local:default");
+    }
+
+    #[test]
+    fn blank_and_repeated_profile_ids_are_repaired() {
+        let mut s = Settings::default();
+        s.connections = vec![local("a", None), local("a", None), local("", None)];
+        s.poll_interval_secs = 0;
+        s.normalize();
+        let ids: Vec<&str> = s.connections.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["a", "a-2", "profile"]);
+        assert_eq!(s.poll_interval_secs, 5);
+    }
+
+    #[test]
+    fn a_pinned_host_key_is_the_same_endpoint() {
+        let json = r#"{"mode":"ssh","host":"h","username":"u","auth":{"kind":"password","password":"p"}}"#;
+        let a: Connection = serde_json::from_str(json).unwrap();
+        let mut b = a.clone();
+        if let Connection::Ssh(s) = &mut b {
+            s.host_key_fingerprint = Some("SHA256:x".into());
+        }
+        assert!(a.same_endpoint(&b));
+        if let Connection::Ssh(s) = &mut b {
+            s.api_port = 7443;
+        }
+        assert!(!a.same_endpoint(&b));
     }
 
     #[test]
@@ -253,7 +402,7 @@ mod tests {
         s.connections.push(ConnectionProfile {
             id: "a".into(),
             name: "A".into(),
-            connection: Connection::Local { kubeconfig_path: None, context: None },
+            connection: Connection::Local { kubeconfig_path: None, context: None, partition: None },
         });
         s.active_connection_id = Some("deleted".into());
         s.normalize();

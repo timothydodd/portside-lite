@@ -29,6 +29,17 @@ pub enum KubeError {
     Other(String),
 }
 
+impl KubeError {
+    /// The API server answered, with an error status (as opposed to the
+    /// request never getting through).
+    pub fn api_status(&self) -> Option<u16> {
+        match self {
+            KubeError::Kube(kube::Error::Api(s)) => Some(s.code),
+            _ => None,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, KubeError>;
 
 /// A connected cluster. Keep it alive for as long as the client is in use —
@@ -41,9 +52,20 @@ pub struct ClusterClient {
     _tunnel: Option<ssh::Tunnel>,
 }
 
+/// Upper bound for a whole connect (SSH handshake and login, reading the
+/// kubeconfig, opening the tunnel), so a server that stops answering part-way
+/// can't hold the caller forever.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 pub async fn connect(conn: &Connection) -> Result<ClusterClient> {
+    tokio::time::timeout(CONNECT_TIMEOUT, connect_inner(conn)).await.map_err(|_| {
+        KubeError::Other(format!("Timed out connecting after {} s: the server stopped answering part-way.", CONNECT_TIMEOUT.as_secs()))
+    })?
+}
+
+async fn connect_inner(conn: &Connection) -> Result<ClusterClient> {
     match conn {
-        Connection::Local { kubeconfig_path, context } => {
+        Connection::Local { kubeconfig_path, context, .. } => {
             let kc = match kubeconfig_path.as_deref().filter(|p| !p.trim().is_empty()) {
                 Some(p) => Kubeconfig::read_from(p)?,
                 None => Kubeconfig::read()?,

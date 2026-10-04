@@ -21,6 +21,15 @@ use tokio::sync::{Mutex, Notify};
 
 /// Parallel container log pulls per cycle.
 const LOG_CONCURRENCY: usize = 6;
+/// kube requests have no read timeout (exec and port-forward streams must be
+/// able to sit idle), so the loops bound their own calls. A half-open
+/// connection, e.g. after the computer slept, would otherwise stall them for good.
+const POLL_TIMEOUT: Duration = Duration::from_secs(60);
+const LOG_PULL_TIMEOUT: Duration = Duration::from_secs(120);
+/// While paused no poll notices a dead connection, so `client()` checks a
+/// cached client itself when it hasn't been verified for this long.
+const PAUSED_RECHECK: Duration = Duration::from_secs(30);
+const PAUSED_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest single message kept; longer lines are truncated.
 const MAX_MESSAGE_BYTES: usize = 8 * 1024;
 /// How often retention pruning runs.
@@ -87,7 +96,8 @@ pub struct Monitor {
     status: RwLock<Status>,
     snapshot: RwLock<Option<Arc<ClusterSnapshot>>>,
     /// Current connection; `None` forces a reconnect on the next cycle.
-    client: Mutex<Option<Arc<ClusterClient>>>,
+    /// The live client, the connection it was built for, and when it last answered.
+    client: Mutex<Option<(Connection, Arc<ClusterClient>, std::time::Instant)>>,
     poll_wake: Notify,
     log_wake: Notify,
     sweep_wake: Notify,
@@ -104,6 +114,8 @@ pub struct Monitor {
     /// Volume file browser sessions (helper pods) by id.
     file_sessions: files::Sessions,
     next_file_session: std::sync::atomic::AtomicU64,
+    /// Marks this install's helper pods (see `Store::install_id`).
+    install_id: String,
     /// Cancel switches for running file transfers, by transfer id.
     transfers: files::Transfers,
 }
@@ -114,11 +126,24 @@ fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl s
 
 impl Monitor {
     pub fn new(store: Arc<Store>, sink: Arc<dyn EventSink>) -> Arc<Self> {
-        let settings = store.load_settings().unwrap_or_default();
+        // Unreadable settings fall back to defaults; the store kept a copy and the status says so.
+        let (settings, load_error) = match store.load_settings() {
+            Ok(s) => (s, None),
+            Err(e) => (
+                Settings::default(),
+                Some(format!(
+                    "The saved settings couldn't be read ({e}), so the defaults are in use. A copy of the old settings is kept in the database under \"{}\".",
+                    portside_store::SETTINGS_UNREADABLE_KEY
+                )),
+            ),
+        };
+        // Without a stored id nothing running is ever taken for an orphan of ours.
+        let install_id = store.install_id().unwrap_or_else(|_| format!("run-{}", now_ms()));
         let status = Status {
             state: if settings.active_connection().is_some() { "connecting" } else { "unconfigured" }.into(),
             cluster_id: settings.active_connection().map(Connection::cluster_id),
             paused: settings.monitoring_paused,
+            message: load_error,
             ..Default::default()
         };
         Arc::new(Self {
@@ -139,6 +164,7 @@ impl Monitor {
             next_forward: std::sync::atomic::AtomicU64::new(1),
             file_sessions: Default::default(),
             next_file_session: std::sync::atomic::AtomicU64::new(1),
+            install_id,
             transfers: Default::default(),
         })
     }
@@ -166,22 +192,20 @@ impl Monitor {
     /// Persist new settings. A changed connection drops the current client and
     /// cached snapshot so the next cycle connects to the new cluster.
     pub async fn update_settings(&self, mut new: Settings) -> Result<Settings, String> {
+        new.keep_partitions(&self.settings.read().unwrap());
         new.normalize();
         let store = Arc::clone(&self.store);
         let to_save = new.clone();
         blocking(move || store.save_settings(&to_save)).await.map_err(|e| e.to_string())?;
-        let (connection_changed, resumed) = {
+        let (connection_changed, resumed, old) = {
             let mut cur = self.settings.write().unwrap();
             // Switching profiles, or editing the active one, means a new cluster.
             let changed = cur.active_connection() != new.active_connection();
             let resumed = cur.monitoring_paused && !new.monitoring_paused;
-            *cur = new.clone();
-            (changed, resumed)
+            let old = std::mem::replace(&mut *cur, new.clone());
+            (changed, resumed, old)
         };
         if connection_changed {
-            // File browser helpers belong to the old cluster.
-            self.close_all_files().await;
-            *self.client.lock().await = None;
             *self.snapshot.write().unwrap() = None;
             self.set_status(|s| {
                 *s = Status {
@@ -190,10 +214,21 @@ impl Monitor {
                     ..Default::default()
                 }
             });
+            // Free the old connection now if nothing holds the lock. If a
+            // connect is in flight it holds it, and `client()` won't keep or
+            // hand out a client built for another connection anyway.
+            if let Ok(mut c) = self.client.try_lock() {
+                *c = None;
+            }
         }
         self.set_status(|s| s.paused = new.monitoring_paused);
         // Keep other listeners (tray menu, other views) in step with the save.
         self.sink.settings_changed(&new);
+        self.stop_orphaned_forwards(&old, &new);
+        if connection_changed {
+            // File browser helpers belong to the old cluster (each session has its own client).
+            self.close_all_files().await;
+        }
         self.refresh_tray();
         self.refresh_now();
         self.log_wake.notify_one();
@@ -228,12 +263,11 @@ impl Monitor {
         self.sink.status(&snapshot);
     }
 
-    /// The live client, connecting if needed.
+    /// The live client for the active connection, connecting if needed. A
+    /// cached client built for another connection (the user just switched) is
+    /// never handed out.
     pub async fn client(&self) -> Result<Arc<ClusterClient>, String> {
         let mut guard = self.client.lock().await;
-        if let Some(c) = guard.as_ref() {
-            return Ok(Arc::clone(c));
-        }
         let conn = self
             .settings
             .read()
@@ -241,13 +275,33 @@ impl Monitor {
             .active_connection()
             .cloned()
             .ok_or_else(|| "No cluster connection configured — open Settings.".to_string())?;
+        let paused = self.settings.read().unwrap().monitoring_paused;
+        match guard.as_mut() {
+            Some((built_for, c, verified)) if built_for.same_endpoint(&conn) => {
+                let alive = !paused
+                    || verified.elapsed() < PAUSED_RECHECK
+                    || matches!(tokio::time::timeout(PAUSED_CHECK_TIMEOUT, c.client.apiserver_version()).await, Ok(Ok(_)));
+                if alive {
+                    if paused && verified.elapsed() >= PAUSED_RECHECK {
+                        *verified = std::time::Instant::now();
+                    }
+                    return Ok(Arc::clone(c));
+                }
+                *guard = None;
+            }
+            _ => *guard = None,
+        }
         self.set_status(|s| {
             s.state = "connecting".into();
             s.message = None;
         });
         let cc = Arc::new(portside_kube::connect(&conn).await.map_err(|e| e.to_string())?);
         self.pin_host_key(&conn, cc.host_key_fingerprint.as_deref()).await;
-        *guard = Some(Arc::clone(&cc));
+        let still_active = self.settings.read().unwrap().active_connection().is_some_and(|c| c.same_endpoint(&conn));
+        if !still_active {
+            return Err("The active cluster changed while connecting.".into());
+        }
+        *guard = Some((conn, Arc::clone(&cc), std::time::Instant::now()));
         Ok(cc)
     }
 
@@ -351,11 +405,27 @@ impl Monitor {
             }
         };
 
-        let objects = match portside_kube::collect::fetch_objects(&cc.client).await {
+        let fetched = tokio::time::timeout(POLL_TIMEOUT, async {
+            // (message, the API server refused): a refusal is an answer, so the connection is fine.
+            let objects = portside_kube::collect::fetch_objects(&cc.client)
+                .await
+                .map_err(|e| (e.to_string(), matches!(e.api_status(), Some(401 | 403))))?;
+            Ok::<_, (String, bool)>((objects, portside_kube::collect::fetch_usage(&cc.client).await))
+        })
+        .await
+        .unwrap_or_else(|_| Err((format!("The cluster didn't answer within {} s.", POLL_TIMEOUT.as_secs()), false)));
+        let (objects, usage) = match fetched {
             Ok(o) => o,
-            Err(e) => {
-                if self.is_current(&cluster) {
-                    // Treat any failure as a dead connection; the next cycle reconnects.
+            Err((e, refused)) => {
+                if self.is_current(&cluster) && refused {
+                    // Reachable, but this account may not read something we need:
+                    // reconnecting (and "can't reach" alerts) wouldn't help.
+                    self.set_status(|s| {
+                        s.state = "error".into();
+                        s.message = Some(e);
+                    });
+                } else if self.is_current(&cluster) {
+                    // Treat any other failure as a dead connection; the next cycle reconnects.
                     self.drop_client().await;
                     self.record_outage(&profile_id, &profile_name, &cluster, Some(&e.to_string()), ACTIVE_OUTAGE_POLLS);
                     self.set_status(|s| {
@@ -366,7 +436,6 @@ impl Monitor {
                 return;
             }
         };
-        let usage = portside_kube::collect::fetch_usage(&cc.client).await;
         let settings = self.settings();
         if !self.is_current(&cluster) {
             return; // switched clusters while polling — this data belongs to the old one
@@ -374,6 +443,16 @@ impl Monitor {
         let now = now_ms();
 
         let mut snap = summarize::build_snapshot(&cluster, &objects, &usage, now);
+        // A list that failed in passing keeps what the last poll saw, instead
+        // of every Service or ConfigMap vanishing for one cycle.
+        if let Some(prev) = self.snapshot().filter(|p| p.cluster_id == cluster) {
+            if objects.unknown.iter().any(|k| matches!(*k, "Service" | "Ingress")) {
+                snap.services = prev.services.clone();
+            }
+            if objects.unknown.iter().any(|k| matches!(*k, "ConfigMap" | "Secret")) {
+                snap.configs = prev.configs.clone();
+            }
+        }
         let mut found = issues::detect(&snap, &settings, now);
 
         let store = Arc::clone(&self.store);
@@ -610,9 +689,14 @@ impl Monitor {
 
     async fn sync_logs_once(&self) {
         let Some(snap) = self.snapshot() else { return };
-        let Ok(cc) = self.client().await else { return };
-        let settings = self.settings();
         let cluster = snap.cluster_id.clone();
+        let Ok(cc) = self.client().await else { return };
+        // The pod list and the client must be the same cluster's: after a
+        // switch the snapshot can be the old one's for a moment.
+        if !self.is_current(&cluster) {
+            return;
+        }
+        let settings = self.settings();
 
         let mut targets = Vec::new();
         for p in &snap.pods {
@@ -634,13 +718,18 @@ impl Monitor {
                 let cluster = cluster.clone();
                 let settings = &settings;
                 async move {
-                    sync_container(&cc, &store, &cluster, settings, &ns, &pod, &uid, &container, restarts).await
+                    tokio::time::timeout(LOG_PULL_TIMEOUT, sync_container(&cc, &store, &cluster, settings, &ns, &pod, &uid, &container, restarts))
+                        .await
+                        .unwrap_or_else(|_| Err(format!("{ns}/{pod}: the log pull timed out")))
                 }
             })
             .buffer_unordered(LOG_CONCURRENCY)
             .collect()
             .await;
 
+        if !self.is_current(&cluster) {
+            return; // switched meanwhile; the status now belongs to the new cluster
+        }
         let lines: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
         let errors = results.iter().filter(|r| r.is_err()).count();
         self.set_status(|s| {
@@ -674,6 +763,9 @@ async fn sync_container(
     let lookback = settings.initial_log_lookback_hours as i64 * 3600;
     let mut cursor_ts = cursor.map(|c| c.last_ts_ns);
     let mut total = 0;
+    // What gets recorded as "restarts seen": stays at the old count when the
+    // crashed instance's tail couldn't be fetched, so the next cycle tries again.
+    let mut seen_restarts = restarts;
 
     if let Some(prev) = cursor {
         if restarts > prev.restart_count {
@@ -690,14 +782,23 @@ async fn sync_container(
                     limit_bytes: Some(settings.max_log_bytes_per_pull),
                 },
             )
-            .await
-            .unwrap_or_default();
+            .await;
+            let text = match text {
+                Ok(t) => t,
+                // The API server answered that there's no previous instance to read: nothing to retry.
+                Err(e) if e.api_status().is_some() => String::new(),
+                Err(_) => {
+                    seen_restarts = prev.restart_count;
+                    String::new()
+                }
+            };
+            let text = whole_lines(text, settings.max_log_bytes_per_pull);
             let (lines, last) = parse_lines(&text, cursor_ts, ns, pod, container);
             total += lines.len();
             if let Some(last) = last {
                 cursor_ts = Some(cursor_ts.map_or(last, |c| c.max(last)));
             }
-            persist(store, cluster, uid, container, cursor_ts, restarts, lines).await?;
+            persist(store, cluster, uid, container, cursor_ts, seen_restarts, lines).await?;
         }
     }
 
@@ -716,6 +817,7 @@ async fn sync_container(
     )
     .await
     .map_err(|e| e.to_string())?;
+    let text = whole_lines(text, settings.max_log_bytes_per_pull);
     let (lines, last) = parse_lines(&text, cursor_ts, ns, pod, container);
     total += lines.len();
     let new_cursor = match (cursor_ts, last) {
@@ -725,8 +827,18 @@ async fn sync_container(
     // Always write the cursor on first sight, even for a silent container, so
     // the next pull uses `since_time` rather than re-reading the lookback.
     let new_cursor = new_cursor.or(Some((now_ms() - 1000) * 1_000_000));
-    persist(store, cluster, uid, container, new_cursor, restarts, lines).await?;
+    persist(store, cluster, uid, container, new_cursor, seen_restarts, lines).await?;
     Ok(total)
+}
+
+/// A pull that hit the byte cap is cut wherever the cap fell, often mid-line.
+/// Drop that last piece: storing it would move the cursor past the line, and
+/// the next pull would then skip the complete one.
+fn whole_lines(mut text: String, cap: i64) -> String {
+    if text.len() as i64 >= cap && !text.ends_with('\n') {
+        text.truncate(text.rfind('\n').map_or(0, |i| i + 1));
+    }
+    text
 }
 
 async fn persist(
@@ -815,7 +927,7 @@ mod tests {
         settings.connections.push(portside_core::ConnectionProfile {
             id: "p1".into(),
             name: "Homelab".into(),
-            connection: Connection::Local { kubeconfig_path: None, context: Some("home".into()) },
+            connection: Connection::Local { kubeconfig_path: None, context: Some("home".into()), partition: None },
         });
         settings.active_connection_id = Some("p1".into());
         store.save_settings(&settings).unwrap();
@@ -886,6 +998,14 @@ mod tests {
         assert!(sink.tooltip.lock().unwrap().contains("2 critical"), "tray still updates");
     }
     use portside_core::logline::Level;
+
+    #[test]
+    fn capped_pull_drops_the_cut_off_line() {
+        let full = "2026-01-01T00:00:00Z one\n2026-01-01T00:00:01Z tw".to_string();
+        assert_eq!(whole_lines(full.clone(), full.len() as i64), "2026-01-01T00:00:00Z one\n");
+        assert_eq!(whole_lines(full.clone(), 4096), full, "under the cap, a missing newline is just the end");
+        assert_eq!(whole_lines("x".repeat(8), 8), "", "one line longer than the cap");
+    }
 
     #[test]
     fn parse_skips_already_seen_and_blank() {

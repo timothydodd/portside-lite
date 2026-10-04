@@ -112,8 +112,9 @@ impl Session {
         channel.exec(true, command).await.map_err(err)?;
         if let Some(input) = stdin {
             channel.data(format!("{input}\n").as_bytes()).await.map_err(err)?;
-            channel.eof().await.map_err(err)?;
         }
+        // Always close stdin, so a command that reads it ends instead of waiting.
+        channel.eof().await.map_err(err)?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut code = None;
@@ -126,7 +127,9 @@ impl Session {
             }
         }
         match code {
-            Some(0) | None => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+            Some(0) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+            // The channel closed without an exit status: the output may be cut short.
+            None => Err(err(format!("the connection closed while `{command}` was running"))),
             Some(c) => Err(err(format!(
                 "`{command}` exited with {c}: {}",
                 String::from_utf8_lossy(&stderr).trim()

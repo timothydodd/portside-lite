@@ -79,6 +79,23 @@ fn strip_cluster_assigned(obj: &mut Value) {
                 o.remove("secrets"); // auto-generated token references
             }
         }
+        "Job" => {
+            // The server generates the selector and its matching labels from
+            // the Job's uid; applying them back is rejected unless the Job
+            // manages its own selector.
+            if obj.pointer("/spec/manualSelector").and_then(Value::as_bool) != Some(true) {
+                if let Some(Value::Object(spec)) = obj.get_mut("spec") {
+                    spec.remove("selector");
+                }
+                for labels in ["/metadata/labels", "/spec/template/metadata/labels"] {
+                    if let Some(Value::Object(l)) = obj.pointer_mut(labels) {
+                        for k in ["controller-uid", "batch.kubernetes.io/controller-uid", "job-name", "batch.kubernetes.io/job-name"] {
+                            l.remove(k);
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -403,7 +420,13 @@ pub fn parse_sources(sources: &[SourceFile]) -> Vec<(ManifestDoc, Option<Value>)
         for de in serde_yaml::Deserializer::from_str(&src.content) {
             match Value::deserialize(de) {
                 Ok(Value::Null) => {} // empty document (e.g. a trailing `---`)
-                Ok(v) if str_at(&v, &["kind"]).is_some_and(|k| k.ends_with("List")) && v.get("items").is_some_and(Value::is_array) => {
+                // A list wrapper (`List`, `DeploymentList`, …) has no name of
+                // its own; a custom resource that happens to be called
+                // `…List` and has an `items` field does.
+                Ok(v) if str_at(&v, &["kind"]).is_some_and(|k| k.ends_with("List"))
+                    && v.get("items").is_some_and(Value::is_array)
+                    && str_at(&v, &["metadata", "name"]).is_none() =>
+                {
                     for item in v["items"].as_array().cloned().unwrap_or_default() {
                         push(&mut out, Ok(item));
                     }
@@ -436,6 +459,33 @@ pub fn apply_order(kind: &str) -> u8 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn exported_job_can_be_applied_again() {
+        let job = |manual: bool| {
+            json!({
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": { "name": "migrate", "namespace": "apps", "labels": { "app": "migrate", "controller-uid": "u1" } },
+                "spec": {
+                    "manualSelector": manual,
+                    "selector": { "matchLabels": { "batch.kubernetes.io/controller-uid": "u1" } },
+                    "template": {
+                        "metadata": { "labels": { "app": "migrate", "batch.kubernetes.io/controller-uid": "u1", "job-name": "migrate" } },
+                        "spec": { "containers": [{ "name": "c", "image": "x" }], "restartPolicy": "Never" }
+                    }
+                }
+            })
+        };
+        let mut generated = job(false);
+        clean_for_export(&mut generated);
+        assert!(generated.pointer("/spec/selector").is_none());
+        assert_eq!(generated.pointer("/spec/template/metadata/labels"), Some(&json!({ "app": "migrate" })));
+        assert_eq!(generated.pointer("/metadata/labels"), Some(&json!({ "app": "migrate" })));
+
+        let mut manual = job(true);
+        clean_for_export(&mut manual);
+        assert!(manual.pointer("/spec/selector").is_some(), "a hand-written selector is the user's");
+    }
 
     fn deployment() -> Value {
         json!({

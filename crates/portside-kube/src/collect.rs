@@ -50,6 +50,11 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         list_or_empty::<Secret>(client, &all),
         list_or_empty::<Ingress>(client, &all),
     );
+    let unknown = [("Service", services.1), ("ConfigMap", configmaps.1), ("Secret", secrets.1), ("Ingress", ingresses.1)]
+        .into_iter()
+        .filter_map(|(kind, failed)| failed.then_some(kind))
+        .collect();
+    let (services, configmaps, secrets, ingresses) = (services.0, configmaps.0, secrets.0, ingresses.0);
     Ok(ClusterObjects {
         server_version: version,
         nodes,
@@ -65,10 +70,13 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         configmaps,
         secrets,
         ingresses,
+        unknown,
     })
 }
 
-async fn list_or_empty<K>(client: &Client, lp: &ListParams) -> Vec<K>
+/// The items, and whether the list failed for a reason that may pass (a
+/// refusal or an unserved kind is a settled "none").
+async fn list_or_empty<K>(client: &Client, lp: &ListParams) -> (Vec<K>, bool)
 where
     K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope>
         + Clone
@@ -76,7 +84,10 @@ where
         + std::fmt::Debug,
     K::DynamicType: Default,
 {
-    list::<K>(client, lp).await.unwrap_or_default()
+    match list::<K>(client, lp).await {
+        Ok(items) => (items, false),
+        Err(e) => (Vec::new(), e.api_status().is_none()),
+    }
 }
 
 #[derive(Deserialize)]

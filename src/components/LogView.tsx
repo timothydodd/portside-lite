@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Copy, WrapText } from "lucide-react";
 import { fmtDateTime } from "../lib/format";
 import type { LogLevel } from "../lib/types";
+import { toast } from "../stores/toast";
 
 export interface LogRow {
   key: string | number;
@@ -111,7 +112,7 @@ export default function LogView({
               <button className="btn-quiet" onClick={() => setWrap((w) => !w)} title="Toggle wrap / pretty JSON">
                 <WrapText size={14} />
               </button>
-              <button className="btn-quiet" onClick={() => void navigator.clipboard.writeText(selected.message)} title="Copy">
+              <button className="btn-quiet" onClick={() => void navigator.clipboard.writeText(selected.message).catch(() => toast.error("Couldn't copy to the clipboard"))} title="Copy">
                 <Copy size={14} />
               </button>
             </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open as openFiles } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { CheckCircle2, ClipboardPaste, FileUp, FlaskConical, ShieldAlert, X } from "lucide-react";
@@ -48,7 +48,10 @@ export default function ImportDialog() {
   const settings = useClusterStore((s) => s.settings);
   const activeId = settings?.activeConnectionId ?? "";
 
-  const [sources, setSources] = useState<SourceFile[]>([]);
+  // `key` is where a source came from (its full path, or a paste number);
+  // `name` is what's shown and must be unique, since results refer to it.
+  const [sources, setSources] = useState<(SourceFile & { key: string })[]>([]);
+  const pastes = useRef(0);
   const [docs, setDocs] = useState<ManifestDoc[]>([]);
   const [picked, setPicked] = useState<Set<number>>(new Set());
   const [pasting, setPasting] = useState(false);
@@ -94,10 +97,19 @@ export default function ImportDialog() {
   const target = settings?.connections.find((p) => p.id === targetId);
   if (!open || !settings) return null;
 
-  const addSources = (more: SourceFile[]) =>
+  const addSources = (more: (SourceFile & { key: string })[]) =>
     setSources((cur) => {
-      const names = new Set(more.map((m) => m.name));
-      return [...cur.filter((c) => !names.has(c.name)), ...more]; // re-adding a file replaces it
+      const keys = new Set(more.map((m) => m.key));
+      const out = cur.filter((c) => !keys.has(c.key)); // re-adding the same file replaces it
+      for (const m of more) {
+        // Two files called deployment.yaml in different folders are both kept, told apart by folder.
+        const taken = (name: string) => out.some((o) => o.name === name);
+        let name = m.name;
+        if (taken(name)) name = m.key.split(/[\\/]/).slice(-2).join("/");
+        for (let n = 2; taken(name); n++) name = `${m.name} (${n})`;
+        out.push({ ...m, name });
+      }
+      return out;
     });
 
   const chooseFiles = async () => {
@@ -107,7 +119,8 @@ export default function ImportDialog() {
     setBusy("read");
     setError(null);
     try {
-      addSources(await ipc.readTextFiles(paths));
+      const files = await ipc.readTextFiles(paths);
+      addSources(files.map((f, i) => ({ ...f, key: paths[i] })));
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -117,8 +130,8 @@ export default function ImportDialog() {
 
   const addPaste = () => {
     if (!pasteText.trim()) return;
-    const n = sources.filter((s) => s.name.startsWith("pasted")).length + 1;
-    addSources([{ name: n === 1 ? "pasted.yaml" : `pasted-${n}.yaml`, content: pasteText }]);
+    const n = ++pastes.current;
+    addSources([{ key: `paste:${n}`, name: n === 1 ? "pasted.yaml" : `pasted-${n}.yaml`, content: pasteText }]);
     setPasteText("");
     setPasting(false);
   };
@@ -158,7 +171,7 @@ export default function ImportDialog() {
     });
 
   return (
-    <Modal title="Import manifests" onClose={close} wide>
+    <Modal title="Import manifests" onClose={close} wide explicitClose={sources.length > 0 || !!pasteText.trim() || busy != null}>
       <div className="flex flex-col gap-4 text-sm">
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={() => void chooseFiles()} disabled={!!busy}>
@@ -192,7 +205,7 @@ export default function ImportDialog() {
             {sources.map((s) => (
               <span key={s.name} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs text-content-secondary">
                 {s.name}
-                <button className="text-content-muted hover:text-content" title="Remove" onClick={() => setSources((cur) => cur.filter((c) => c.name !== s.name))}>
+                <button className="text-content-muted hover:text-content" title="Remove" onClick={() => setSources((cur) => cur.filter((c) => c.key !== s.key))}>
                   <X size={12} />
                 </button>
               </span>

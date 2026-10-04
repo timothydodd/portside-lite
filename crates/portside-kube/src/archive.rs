@@ -9,7 +9,7 @@ use portside_core::manifest::{apply_order, ObjectRef};
 use crate::manifests::{api_for_kind, get_value, list_values, related, CopyResult};
 use crate::Result;
 
-const WORKLOAD_KINDS: [&str; 5] = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
+pub const WORKLOAD_KINDS: [&str; 5] = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
 
 /// Related objects of a workload, each with the other workloads that still
 /// use it, so the archive dialog only offers to remove what nothing else needs.
@@ -17,10 +17,10 @@ pub async fn plan(client: &Client, kind: &str, namespace: &str, name: &str) -> R
     let target = get_value(client, kind, Some(namespace), name).await?;
     let rel = related(client, kind, namespace, name).await?;
     let (services, ingresses) =
-        futures::join!(list_values(client, "Service", namespace), list_values(client, "Ingress", namespace));
+        futures::try_join!(list_values(client, "Service", namespace), list_values(client, "Ingress", namespace))?;
     let mut workloads = Vec::new();
     for k in WORKLOAD_KINDS {
-        workloads.extend(list_values(client, k, namespace).await);
+        workloads.extend(list_values(client, k, namespace).await?);
     }
     Ok(plan_items(&target, rel, &workloads, &services, &ingresses))
 }

@@ -28,7 +28,11 @@ export default function ExportDialog() {
         setRelated(r);
         setPicked(new Set(r.filter((x) => x.exists && x.defaultSelected).map(refKey)));
       })
-      .catch((e) => setError(errorMessage(e)));
+      .catch((e) => {
+        // The workload itself can still be exported without what belongs to it.
+        setRelated([]);
+        setError(`Couldn't look up what belongs with it (${errorMessage(e)}). You can still export the workload on its own.`);
+      });
   }, [target]);
 
   const secretsPicked = useMemo(() => (related ?? []).some((r) => r.sensitive && picked.has(refKey(r))), [related, picked]);

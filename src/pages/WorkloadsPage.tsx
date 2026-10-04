@@ -12,7 +12,7 @@ import { workloadHealth as health } from "../lib/workloads";
 import SnapshotGate from "../components/SnapshotGate";
 import ArchiveList from "../components/ArchiveList";
 import { ARCHIVABLE } from "../components/WorkloadDrawer";
-import { NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
+import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useArchivesStore } from "../stores/archives";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
@@ -114,6 +114,9 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
   const restartable = kind === "Deployment" || kind === "StatefulSet" || kind === "DaemonSet";
   const scalable = kind === "Deployment" || kind === "StatefulSet";
 
+  if (sorted.length === 0) {
+    return <EmptyState title={`No ${kind}s`}>Nothing matches the namespace and search filter, or the cluster has none.</EmptyState>;
+  }
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       <table className="table">
@@ -132,8 +135,9 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
           {sorted.map((w) => {
             const h = health(w);
             const key = `${w.namespace}/${w.name}`;
+            const ref = { kind: w.kind, namespace: w.namespace, name: w.name };
             return (
-              <tr key={key} className="cursor-pointer" title="Open overview" onClick={() => openWorkload({ kind: w.kind, namespace: w.namespace, name: w.name })}>
+              <tr key={key} className="cursor-pointer" title="Open overview" onClick={() => openWorkload(ref)}>
                 <td className="font-medium text-content">{w.name}</td>
                 <td className="text-content-secondary">{w.namespace}</td>
                 <td>
@@ -148,37 +152,27 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
                 </td>
                 <td className="text-right text-xs text-content-muted">{kind === "CronJob" ? fmtAgo(w.lastScheduleMs) : fmtAge(w.createdMs)}</td>
                 <td className="whitespace-nowrap text-right" onClick={(e) => e.stopPropagation()}>
-                  <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: w.kind, namespace: w.namespace, name: w.name })}>
-                    <FileCode2 size={14} />
-                  </button>
-                  <button className="btn-quiet" title="Export with its Services and config" onClick={() => openExport({ kind: w.kind, namespace: w.namespace, name: w.name })}>
-                    <Download size={14} />
-                  </button>
-                  <button className="btn-quiet" title="Copy to another cluster or namespace" onClick={() => openCopy({ kind: w.kind, namespace: w.namespace, name: w.name })}>
-                    <Copy size={14} />
-                  </button>
-                  {restartable && (
-                    <button className="btn-quiet" title="Rollout restart" onClick={() => void runAction("rolloutRestart", { kind: w.kind, namespace: w.namespace, name: w.name })}>
-                      <RotateCcw size={14} />
-                    </button>
-                  )}
-                  {scalable && (
-                    <button className="btn-quiet" title="Scale" onClick={() => void runAction("scale", { kind: w.kind, namespace: w.namespace, name: w.name, replicas: w.desired, remembered: w.disabledReplicas })}>
-                      <Scaling size={14} />
-                    </button>
-                  )}
-                  {ARCHIVABLE.includes(w.kind) && (
-                    <button className="btn-quiet" title="Archive: save to a local folder, then remove from the cluster" onClick={() => openArchive({ kind: w.kind, namespace: w.namespace, name: w.name })}>
-                      <Archive size={14} />
-                    </button>
-                  )}
-                  <button
-                    className="btn-quiet hover:!text-critical"
-                    title={`Delete ${w.kind}`}
-                    onClick={() => useDeleteDialog.getState().open({ kind: w.kind, namespace: w.namespace, name: w.name })}
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  <ActionMenu
+                    label={`Actions for ${w.name}`}
+                    items={[
+                      { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => openEditor(ref) },
+                      { label: "Export…", icon: <Download size={14} />, title: "Export with its Services and config", onSelect: () => openExport(ref) },
+                      { label: "Copy to…", icon: <Copy size={14} />, title: "Copy to another cluster or namespace", onSelect: () => openCopy(ref) },
+                      restartable && { label: "Rollout restart", icon: <RotateCcw size={14} />, onSelect: () => void runAction("rolloutRestart", ref) },
+                      scalable && {
+                        label: "Scale…",
+                        icon: <Scaling size={14} />,
+                        onSelect: () => void runAction("scale", { ...ref, replicas: w.desired, remembered: w.disabledReplicas }),
+                      },
+                      ARCHIVABLE.includes(w.kind) && {
+                        label: "Archive…",
+                        icon: <Archive size={14} />,
+                        title: "Save to a local folder, then remove from the cluster",
+                        onSelect: () => openArchive(ref),
+                      },
+                      { label: `Delete ${w.kind}…`, icon: <Trash2 size={14} />, danger: true, onSelect: () => useDeleteDialog.getState().open(ref) },
+                    ]}
+                  />
                 </td>
               </tr>
             );

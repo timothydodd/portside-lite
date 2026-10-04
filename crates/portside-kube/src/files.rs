@@ -58,6 +58,7 @@ pub async fn start_helper(
     image: &str,
     node: Option<&str>,
     read_only: bool,
+    owner: &str,
 ) -> Result<String> {
     let pvcs = Api::<PersistentVolumeClaim>::namespaced(client.clone(), namespace);
     if pvcs.get_opt(claim).await?.is_none() {
@@ -67,14 +68,17 @@ pub async fn start_helper(
     let stale = pods.list(&ListParams::default().labels(&format!("{}=true", core_files::HELPER_LABEL))).await?;
     for p in stale.items.iter().filter(|p| core_files::helper_claim(p) == Some(claim)) {
         let phase = p.status.as_ref().and_then(|s| s.phase.as_deref());
-        if matches!(phase, Some("Succeeded" | "Failed")) {
+        // Finished helpers, and live ones this install started earlier: the
+        // caller has no session for the claim (or just stopped its helper), so
+        // one of ours still running was orphaned by a crash or a kill.
+        if matches!(phase, Some("Succeeded" | "Failed")) || core_files::helper_owner(p) == Some(owner) {
             if let Some(name) = &p.metadata.name {
                 let _ = pods.delete(name, &DeleteParams::default().grace_period(0)).await;
             }
         }
     }
 
-    let spec = core_files::helper_pod(namespace, claim, image, node, read_only);
+    let spec = core_files::helper_pod(namespace, claim, image, node, read_only, owner);
     let created = pods.create(&PostParams::default(), &spec).await.map_err(|e| match &e {
         kube::Error::Api(s) if s.code == 403 || s.code == 422 => other(format!(
             "The cluster refused the file-browser pod: {}. A Pod Security policy that forbids root pods would do this.",
@@ -365,19 +369,40 @@ pub async fn download(
     dest: &Path,
     progress: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<u64> {
-    let mut f = tokio::fs::File::create(dest).await.map_err(|e| other(format!("Couldn't create {}: {e}", dest.display())))?;
+    // Into a sibling first: a failed or cancelled download must not cost the
+    // user a file that was already at `dest`.
+    let part = part_path(dest);
+    let mut f = tokio::fs::File::create(&part).await.map_err(|e| other(format!("Couldn't create {}: {e}", part.display())))?;
     let cmd = if folder { core_files::tar_command(rel) } else { core_files::cat_command(rel) };
-    let res = run_to(client, namespace, pod, cmd, &mut f, progress).await;
+    let mut res = run_to(client, namespace, pod, cmd, &mut f, progress).await;
     drop(f);
+    if res.is_ok() {
+        if let Err(e) = tokio::fs::rename(&part, dest).await {
+            res = Err(other(format!("Couldn't save {}: {e}", dest.display())));
+        }
+    }
     if res.is_err() {
-        let _ = tokio::fs::remove_file(dest).await;
+        let _ = tokio::fs::remove_file(&part).await;
     }
     res
+}
+
+/// Where a download is written until it's complete (then renamed to `dest`).
+pub fn part_path(dest: &Path) -> std::path::PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".portside-part");
+    dest.with_file_name(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn part_file_sits_next_to_the_destination() {
+        assert_eq!(part_path(Path::new("/tmp/out/app.db")), Path::new("/tmp/out/app.db.portside-part"));
+        assert_eq!(part_path(Path::new("site.tar.gz")), Path::new("site.tar.gz.portside-part"));
+    }
 
     #[test]
     fn walks_folders_parents_first() {
