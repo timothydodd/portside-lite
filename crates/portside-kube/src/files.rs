@@ -154,6 +154,24 @@ pub async fn stop_helper(client: &Client, namespace: &str, pod: &str) -> Result<
     }
 }
 
+/// Delete a claim. Helper pods for it go first (anyone's): the claim would
+/// otherwise sit in Terminating until they exit. The caller checks that
+/// nothing else uses it.
+pub async fn delete_claim(client: &Client, namespace: &str, claim: &str) -> Result<()> {
+    let pods = Api::<Pod>::namespaced(client.clone(), namespace);
+    let helpers = pods.list(&ListParams::default().labels(&format!("{}=true", core_files::HELPER_LABEL))).await?;
+    for p in helpers.items.iter().filter(|p| core_files::helper_claim(p) == Some(claim)) {
+        if let Some(name) = &p.metadata.name {
+            let _ = pods.delete(name, &DeleteParams::default().grace_period(0)).await;
+        }
+    }
+    match Api::<PersistentVolumeClaim>::namespaced(client.clone(), namespace).delete(claim, &DeleteParams::default()).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(s)) if s.code == 404 => Err(other(format!("PersistentVolumeClaim {namespace}/{claim} is already gone."))),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The helper is still there and running (it exits after its lifetime).
 pub async fn helper_running(client: &Client, namespace: &str, pod: &str) -> Result<bool> {
     let p = Api::<Pod>::namespaced(client.clone(), namespace).get_opt(pod).await?;

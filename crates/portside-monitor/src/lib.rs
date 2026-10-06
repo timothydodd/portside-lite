@@ -448,6 +448,17 @@ impl Monitor {
         if let Some(prev) = self.snapshot().filter(|p| p.cluster_id == cluster) {
             if objects.unknown.iter().any(|k| matches!(*k, "Service" | "Ingress")) {
                 snap.services = prev.services.clone();
+                // Backend checks need the Services, so keep both together.
+                snap.ingresses = prev.ingresses.clone();
+            }
+            if objects.unknown.contains(&"HorizontalPodAutoscaler") {
+                snap.autoscalers = prev.autoscalers.clone();
+            }
+            if objects.unknown.contains(&"PersistentVolume") {
+                snap.persistent_volumes = prev.persistent_volumes.clone();
+            }
+            if objects.unknown.contains(&"StorageClass") {
+                snap.storage_classes = prev.storage_classes.clone();
             }
             if objects.unknown.iter().any(|k| matches!(*k, "ConfigMap" | "Secret")) {
                 snap.configs = prev.configs.clone();

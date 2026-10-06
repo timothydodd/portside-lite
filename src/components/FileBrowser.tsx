@@ -30,6 +30,7 @@ import { ActionMenu, Drawer, EmptyState, Modal, Spinner } from "./ui";
 
 const join = (dir: string, name: string) => (dir ? `${dir}/${name}` : name);
 const isFolder = (e: FileEntry) => e.kind === "dir" || e.linkToDir;
+const READ_ONLY_HINT = "Read-only: scale the apps using this volume to 0 to change files";
 
 /** Start (or join) the helper pod for a claim; closed again on unmount. */
 function useFileSession(namespace: string, claim: string) {
@@ -413,10 +414,11 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
                             disabled: busy,
                             onSelect: () => void download(e),
                           },
-                          writable && {
+                          {
                             label: "Rename",
                             icon: <Pencil size={14} />,
-                            disabled: busy,
+                            disabled: busy || !writable,
+                            title: writable ? undefined : READ_ONLY_HINT,
                             onSelect: () =>
                               setNaming({
                                 title: `Rename ${e.name}`,
@@ -424,7 +426,14 @@ export function FileBrowser({ namespace, claim }: { namespace: string; claim: st
                                 submit: (name) => write(() => ipc.renameVolumePath(session.id, join(shownPath, e.name), name)),
                               }),
                           },
-                          writable && { label: "Delete", icon: <Trash2 size={14} />, danger: true, disabled: busy, onSelect: () => void remove(e) },
+                          {
+                            label: "Delete",
+                            icon: <Trash2 size={14} />,
+                            danger: true,
+                            disabled: busy || !writable,
+                            title: writable ? undefined : READ_ONLY_HINT,
+                            onSelect: () => void remove(e),
+                          },
                         ]}
                       />
                     </td>

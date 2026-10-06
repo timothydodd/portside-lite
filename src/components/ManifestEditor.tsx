@@ -54,7 +54,7 @@ export default function ManifestEditor() {
   };
 
   const run = async (dryRun: boolean) => {
-    if (!dryRun && !(await confirmDestructive(`Apply your changes to ${target.kind} ${target.namespace}/${target.name}?`, "Apply YAML"))) return;
+    if (!dryRun && !(await confirmDestructive(`Apply your changes to ${target.kind} ${target.namespace ? `${target.namespace}/` : ""}${target.name}?`, "Apply YAML"))) return;
     setBusy(dryRun ? "dry" : "apply");
     setResult(null);
     try {
@@ -93,7 +93,7 @@ export default function ManifestEditor() {
   return (
     <Drawer
       title={`${target.kind} ${target.name}`}
-      subtitle={`${target.namespace} · edit YAML${dirty ? " · unsaved changes" : ""}`}
+      subtitle={`${target.namespace || "cluster-wide"} · edit YAML${dirty ? " · unsaved changes" : ""}`}
       onClose={() => void close()}
       actions={
         <>

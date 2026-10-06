@@ -7,10 +7,11 @@ import { saveYamlFile } from "../lib/files";
 import { errorMessage } from "../lib/format";
 import { toast } from "../stores/toast";
 import { fmtAge, fmtAgo } from "../lib/format";
-import type { WorkloadInfo } from "../lib/types";
+import type { AutoscalerInfo, WorkloadInfo } from "../lib/types";
 import { workloadHealth as health } from "../lib/workloads";
 import SnapshotGate from "../components/SnapshotGate";
 import ArchiveList from "../components/ArchiveList";
+import AutoscalerTable from "../components/AutoscalerTable";
 import { ARCHIVABLE } from "../components/WorkloadDrawer";
 import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useArchivesStore } from "../stores/archives";
@@ -18,7 +19,7 @@ import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
 
 const KINDS: WorkloadInfo["kind"][] = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
-type Tab = WorkloadInfo["kind"] | "Archived";
+type Tab = WorkloadInfo["kind"] | "Autoscalers" | "Archived";
 
 async function exportAll(kind: string, namespace: string | null) {
   try {
@@ -64,8 +65,8 @@ export default function WorkloadsPage() {
                   </button>
                   <button
                     className="btn-ghost"
-                    title={`Save every ${kind} ${namespace ? `in ${namespace}` : "in all namespaces"} as one YAML file`}
-                    onClick={() => void exportAll(kind, namespace || null)}
+                    title={`Save every ${kind === "Autoscalers" ? "HorizontalPodAutoscaler" : kind} ${namespace ? `in ${namespace}` : "in all namespaces"} as one YAML file`}
+                    onClick={() => void exportAll(kind === "Autoscalers" ? "HorizontalPodAutoscaler" : kind, namespace || null)}
                   >
                     <Download size={14} /> Export all
                   </button>
@@ -80,6 +81,9 @@ export default function WorkloadsPage() {
                   {k}s <span className="text-content-muted">{count(k)}</span>
                 </button>
               ))}
+              <button className={`navtab ${kind === "Autoscalers" ? "navtab-active" : ""}`} title="HorizontalPodAutoscalers" onClick={() => setKind("Autoscalers")}>
+                Autoscalers <span className="text-content-muted">{s.autoscalers.length}</span>
+              </button>
               <button className={`navtab ml-auto ${kind === "Archived" ? "navtab-active" : ""}`} onClick={() => setKind("Archived")}>
                 <Archive size={13} className="mr-1 inline" />
                 Archived <span className="text-content-muted">{archivedHere}</span>
@@ -87,6 +91,14 @@ export default function WorkloadsPage() {
             </div>
             {kind === "Archived" ? (
               <ArchiveList namespace={namespace} search={search} />
+            ) : kind === "Autoscalers" ? (
+              <AutoscalerTable
+                rows={s.autoscalers.filter(
+                  (h) =>
+                    (!namespace || h.namespace === namespace) &&
+                    (!search || `${h.name} ${h.targetName}`.toLowerCase().includes(search.toLowerCase())),
+                )}
+              />
             ) : (
               <WorkloadTable
                 rows={s.workloads.filter(
@@ -96,6 +108,7 @@ export default function WorkloadsPage() {
                     (!search || w.name.toLowerCase().includes(search.toLowerCase())),
                 )}
                 kind={kind}
+                autoscalers={s.autoscalers}
               />
             )}
           </div>
@@ -105,7 +118,7 @@ export default function WorkloadsPage() {
   );
 }
 
-function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInfo["kind"] }) {
+function WorkloadTable({ rows, kind, autoscalers }: { rows: WorkloadInfo[]; kind: WorkloadInfo["kind"]; autoscalers: AutoscalerInfo[] }) {
   const { openEditor, openCopy, openExport, openArchive, openWorkload } = useNavStore();
   const sorted = useMemo(() => {
     const rank = { critical: 0, warning: 1, good: 2, muted: 3 };
@@ -136,6 +149,7 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
             const h = health(w);
             const key = `${w.namespace}/${w.name}`;
             const ref = { kind: w.kind, namespace: w.namespace, name: w.name };
+            const hpa = autoscalers.find((a) => a.namespace === w.namespace && a.targetKind === w.kind && a.targetName === w.name);
             return (
               <tr key={key} className="cursor-pointer" title="Open overview" onClick={() => openWorkload(ref)}>
                 <td className="font-medium text-content">{w.name}</td>
@@ -146,6 +160,11 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
                 </td>
                 <td className="tabular-nums">
                   {kind === "CronJob" ? <span className="mono">{w.schedule}</span> : kind === "Job" ? `${w.ready}/${w.desired}${w.failed ? ` · ${w.failed} failed` : ""}` : `${w.ready}/${w.desired}`}
+                  {hpa && (
+                    <div className="text-[11px] text-content-muted" title={`Autoscaled by ${hpa.name}: replica count is managed by the HPA`}>
+                      auto {hpa.minReplicas}–{hpa.maxReplicas}
+                    </div>
+                  )}
                 </td>
                 <td className="text-xs text-content-muted" title={w.images.join("\n")}>
                   <div className="max-w-[280px] truncate">{w.images.join(", ")}</div>
@@ -162,6 +181,7 @@ function WorkloadTable({ rows, kind }: { rows: WorkloadInfo[]; kind: WorkloadInf
                       scalable && {
                         label: "Scale…",
                         icon: <Scaling size={14} />,
+                        title: hpa ? `${hpa.name} manages the replica count and will undo a manual scale (except to 0)` : undefined,
                         onSelect: () => void runAction("scale", { ...ref, replicas: w.desired, remembered: w.disabledReplicas }),
                       },
                       ARCHIVABLE.includes(w.kind) && {

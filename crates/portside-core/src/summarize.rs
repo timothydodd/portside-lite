@@ -7,7 +7,10 @@ use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ContainerStatus, Event, Node, PersistentVolumeClaim, Pod, PodSpec, Secret, Service,
 };
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
+use k8s_openapi::api::core::v1::PersistentVolume;
 use k8s_openapi::api::networking::v1::Ingress;
+use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
 
@@ -32,6 +35,9 @@ pub struct ClusterObjects {
     pub configmaps: Vec<ConfigMap>,
     pub secrets: Vec<Secret>,
     pub ingresses: Vec<Ingress>,
+    pub hpas: Vec<HorizontalPodAutoscaler>,
+    pub pvs: Vec<PersistentVolume>,
+    pub storage_classes: Vec<StorageClass>,
     /// Optional kinds whose list failed for a passing reason (not "forbidden"
     /// or "not served"): their vectors are empty because we don't know, not
     /// because there are none.
@@ -102,6 +108,14 @@ pub fn build_snapshot(
         }
     }
     let services = services_info(objs);
+    let ingresses = objs.ingresses.iter().map(|i| ingress_info(i, &services)).collect();
+    let autoscalers = objs.hpas.iter().map(autoscaler_info).collect();
+    let persistent_volumes: Vec<PersistentVolumeInfo> = objs.pvs.iter().map(pv_info).collect();
+    let storage_classes = objs
+        .storage_classes
+        .iter()
+        .map(|c| storage_class_info(c, &persistent_volumes, &volumes))
+        .collect();
     let configs = configs_info(objs);
 
     let mut events: Vec<EventInfo> = objs.events.iter().map(event_info).collect();
@@ -146,6 +160,10 @@ pub fn build_snapshot(
         workloads,
         volumes,
         services,
+        ingresses,
+        autoscalers,
+        persistent_volumes,
+        storage_classes,
         configs,
         events,
         issues: Vec::new(),
@@ -606,6 +624,179 @@ fn pvc_info(p: &PersistentVolumeClaim, objs: &ClusterObjects) -> VolumeClaimInfo
     }
 }
 
+fn ingress_info(ing: &Ingress, services: &[ServiceInfo]) -> IngressInfo {
+    let ns = ns_of(&ing.metadata);
+    let spec = ing.spec.clone().unwrap_or_default();
+    let route = |host: String, path: String, b: &k8s_openapi::api::networking::v1::IngressBackend| {
+        let svc = b.service.as_ref();
+        IngressRoute {
+            host,
+            path,
+            service: svc.map(|s| s.name.clone()),
+            port: svc.and_then(|s| s.port.as_ref()).and_then(|p| p.number.map(|n| n.to_string()).or_else(|| p.name.clone())),
+            resource: b.resource.as_ref().map(|r| format!("{}/{}", r.kind, r.name)),
+            service_found: svc.is_some_and(|s| services.iter().any(|x| x.namespace == ns && x.name == s.name)),
+        }
+    };
+    let mut routes = Vec::new();
+    if let Some(b) = &spec.default_backend {
+        routes.push(route("(default)".into(), "/".into(), b));
+    }
+    for rule in spec.rules.iter().flatten() {
+        let host = rule.host.clone().unwrap_or_else(|| "*".into());
+        for p in rule.http.iter().flat_map(|h| h.paths.iter()) {
+            routes.push(route(host.clone(), p.path.clone().unwrap_or_else(|| "/".into()), &p.backend));
+        }
+    }
+    IngressInfo {
+        class: spec.ingress_class_name.clone().or_else(|| {
+            ing.metadata.annotations.as_ref().and_then(|a| a.get("kubernetes.io/ingress.class")).cloned()
+        }),
+        routes,
+        tls_hosts: spec.tls.iter().flatten().flat_map(|t| t.hosts.clone().unwrap_or_default()).collect(),
+        address: ing
+            .status
+            .as_ref()
+            .and_then(|s| s.load_balancer.as_ref())
+            .and_then(|lb| lb.ingress.as_ref())
+            .map(|v| v.iter().filter_map(|i| i.ip.clone().or_else(|| i.hostname.clone())).collect())
+            .unwrap_or_default(),
+        created_ms: ms(&ing.metadata.creation_timestamp),
+        name: name_of(&ing.metadata),
+        namespace: ns,
+    }
+}
+
+fn autoscaler_info(h: &HorizontalPodAutoscaler) -> AutoscalerInfo {
+    use k8s_openapi::api::autoscaling::v2::{MetricTarget, MetricValueStatus};
+    let spec = &h.spec;
+    let st = h.status.clone().unwrap_or_default();
+    let target = |t: &MetricTarget| {
+        t.average_utilization
+            .map(|u| format!("{u}%"))
+            .or_else(|| t.average_value.as_ref().map(|q| q.0.clone()))
+            .or_else(|| t.value.as_ref().map(|q| q.0.clone()))
+            .unwrap_or_else(|| "?".into())
+    };
+    let current = |v: Option<&MetricValueStatus>| {
+        v.and_then(|v| {
+            v.average_utilization
+                .map(|u| format!("{u}%"))
+                .or_else(|| v.average_value.as_ref().map(|q| q.0.clone()))
+                .or_else(|| v.value.as_ref().map(|q| q.0.clone()))
+        })
+        .unwrap_or_else(|| "?".into())
+    };
+    let statuses = st.current_metrics.clone().unwrap_or_default();
+    let metrics = spec
+        .metrics
+        .iter()
+        .flatten()
+        .map(|m| match m.type_.as_str() {
+            "Resource" => {
+                let r = m.resource.as_ref();
+                let name = r.map(|r| r.name.clone()).unwrap_or_default();
+                let now = statuses.iter().filter_map(|s| s.resource.as_ref()).find(|s| s.name == name).map(|s| &s.current);
+                format!("{name} {} / {}", current(now), r.map(|r| target(&r.target)).unwrap_or_default())
+            }
+            "ContainerResource" => {
+                let r = m.container_resource.as_ref();
+                let name = r.map(|r| format!("{} ({})", r.name, r.container)).unwrap_or_default();
+                format!("{name} / {}", r.map(|r| target(&r.target)).unwrap_or_default())
+            }
+            "Pods" => m.pods.as_ref().map(|p| format!("{} / {}", p.metric.name, target(&p.target))).unwrap_or_default(),
+            "Object" => m.object.as_ref().map(|o| format!("{} / {}", o.metric.name, target(&o.target))).unwrap_or_default(),
+            "External" => m.external.as_ref().map(|e| format!("{} / {}", e.metric.name, target(&e.target))).unwrap_or_default(),
+            other => other.to_string(),
+        })
+        .collect();
+    let conditions = st.conditions.clone().unwrap_or_default();
+    let problem = conditions
+        .iter()
+        .find(|c| (c.type_ == "AbleToScale" || c.type_ == "ScalingActive") && c.status == "False")
+        .map(|c| c.message.clone().or_else(|| c.reason.clone()).unwrap_or_else(|| format!("{} is False", c.type_)));
+    let at_max = conditions
+        .iter()
+        .any(|c| c.type_ == "ScalingLimited" && c.status == "True" && c.reason.as_deref() == Some("TooManyReplicas"));
+    AutoscalerInfo {
+        namespace: ns_of(&h.metadata),
+        name: name_of(&h.metadata),
+        target_kind: spec.scale_target_ref.kind.clone(),
+        target_name: spec.scale_target_ref.name.clone(),
+        min_replicas: spec.min_replicas.unwrap_or(1),
+        max_replicas: spec.max_replicas,
+        current_replicas: st.current_replicas.unwrap_or(0),
+        desired_replicas: st.desired_replicas,
+        metrics,
+        problem,
+        at_max,
+        last_scale_ms: ms(&st.last_scale_time),
+        created_ms: ms(&h.metadata.creation_timestamp),
+    }
+}
+
+fn pv_info(pv: &PersistentVolume) -> PersistentVolumeInfo {
+    let spec = pv.spec.clone().unwrap_or_default();
+    let st = pv.status.clone().unwrap_or_default();
+    let source = if let Some(h) = &spec.host_path {
+        Some(format!("hostPath {}", h.path))
+    } else if let Some(l) = &spec.local {
+        Some(format!("local {}", l.path))
+    } else if let Some(n) = &spec.nfs {
+        Some(format!("nfs {}:{}", n.server, n.path))
+    } else if let Some(c) = &spec.csi {
+        Some(format!("csi {}", c.driver))
+    } else {
+        None
+    };
+    // local-path / local volumes pin to one node through a hostname term.
+    let node = spec
+        .node_affinity
+        .as_ref()
+        .and_then(|a| a.required.as_ref())
+        .and_then(|r| r.node_selector_terms.first())
+        .and_then(|t| t.match_expressions.as_ref())
+        .and_then(|es| es.iter().find(|e| e.key == "kubernetes.io/hostname"))
+        .and_then(|e| e.values.as_ref())
+        .and_then(|v| v.first().cloned());
+    PersistentVolumeInfo {
+        name: name_of(&pv.metadata),
+        phase: st.phase.unwrap_or_else(|| "Unknown".into()),
+        capacity: spec.capacity.as_ref().and_then(|c| c.get("storage")).map(|q| q.0.clone()),
+        storage_class: spec.storage_class_name.clone().filter(|c| !c.is_empty()),
+        reclaim_policy: spec.persistent_volume_reclaim_policy.clone(),
+        access_modes: spec.access_modes.clone().unwrap_or_default(),
+        claim: spec
+            .claim_ref
+            .as_ref()
+            .and_then(|c| Some(format!("{}/{}", c.namespace.as_deref()?, c.name.as_deref()?))),
+        source,
+        node,
+        message: st.message.filter(|m| !m.is_empty()),
+        phase_since_ms: ms(&st.last_phase_transition_time),
+        created_ms: ms(&pv.metadata.creation_timestamp),
+    }
+}
+
+fn storage_class_info(c: &StorageClass, pvs: &[PersistentVolumeInfo], claims: &[VolumeClaimInfo]) -> StorageClassInfo {
+    let name = name_of(&c.metadata);
+    let annotations = c.metadata.annotations.as_ref();
+    let is_default = ["storageclass.kubernetes.io/is-default-class", "storageclass.beta.kubernetes.io/is-default-class"]
+        .iter()
+        .any(|k| annotations.and_then(|a| a.get(*k)).is_some_and(|v| v == "true"));
+    StorageClassInfo {
+        provisioner: c.provisioner.clone(),
+        reclaim_policy: c.reclaim_policy.clone(),
+        binding_mode: c.volume_binding_mode.clone(),
+        allow_expansion: c.allow_volume_expansion.unwrap_or(false),
+        is_default,
+        volumes: pvs.iter().filter(|p| p.storage_class.as_deref() == Some(name.as_str())).count(),
+        claims: claims.iter().filter(|p| p.storage_class.as_deref() == Some(name.as_str())).count(),
+        created_ms: ms(&c.metadata.creation_timestamp),
+        name,
+    }
+}
+
 fn pod_is_ready(p: &Pod) -> bool {
     p.status
         .as_ref()
@@ -885,5 +1076,72 @@ mod tests {
         assert_eq!((s.pods_matched, s.pods_ready), (2, 1));
         assert_eq!(s.ports[0].target_port.as_deref(), Some("8080"));
         assert_eq!(s.routes, vec!["shop.lan/ (web-ing)"]);
+    }
+
+    #[test]
+    fn ingresses_autoscalers_and_storage() {
+        let ing: Ingress = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web", "namespace": "apps" },
+            "spec": {
+                "ingressClassName": "traefik",
+                "tls": [{ "hosts": ["shop.lan"] }],
+                "rules": [{ "host": "shop.lan", "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix", "backend": { "service": { "name": "web", "port": { "number": 80 } } } },
+                    { "path": "/api", "pathType": "Prefix", "backend": { "service": { "name": "api", "port": { "name": "http" } } } }
+                ] } }]
+            },
+            "status": { "loadBalancer": { "ingress": [{ "ip": "192.168.1.240" }] } }
+        }))
+        .unwrap();
+        let svc: Service = serde_json::from_value(serde_json::json!({ "metadata": { "name": "web", "namespace": "apps" }, "spec": {} })).unwrap();
+        let hpa: HorizontalPodAutoscaler = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web", "namespace": "apps" },
+            "spec": { "scaleTargetRef": { "kind": "Deployment", "name": "web" }, "minReplicas": 2, "maxReplicas": 5,
+                      "metrics": [{ "type": "Resource", "resource": { "name": "cpu", "target": { "type": "Utilization", "averageUtilization": 80 } } }] },
+            "status": { "currentReplicas": 5, "desiredReplicas": 5,
+                        "currentMetrics": [{ "type": "Resource", "resource": { "name": "cpu", "current": { "averageUtilization": 95 } } }],
+                        "conditions": [
+                            { "type": "AbleToScale", "status": "True" },
+                            { "type": "ScalingActive", "status": "True" },
+                            { "type": "ScalingLimited", "status": "True", "reason": "TooManyReplicas" }
+                        ] }
+        }))
+        .unwrap();
+        let pv: PersistentVolume = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "pvc-1" },
+            "spec": { "capacity": { "storage": "5Gi" }, "storageClassName": "local-path", "persistentVolumeReclaimPolicy": "Retain",
+                      "hostPath": { "path": "/var/lib/rancher/k3s/storage/pvc-1" },
+                      "claimRef": { "namespace": "apps", "name": "data" },
+                      "nodeAffinity": { "required": { "nodeSelectorTerms": [{ "matchExpressions": [{ "key": "kubernetes.io/hostname", "operator": "In", "values": ["node-a"] }] }] } } },
+            "status": { "phase": "Released" }
+        }))
+        .unwrap();
+        let sc: StorageClass = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "local-path", "annotations": { "storageclass.kubernetes.io/is-default-class": "true" } },
+            "provisioner": "rancher.io/local-path", "volumeBindingMode": "WaitForFirstConsumer"
+        }))
+        .unwrap();
+        let objs = ClusterObjects { services: vec![svc], ingresses: vec![ing], hpas: vec![hpa], pvs: vec![pv], storage_classes: vec![sc], ..Default::default() };
+        let snap = build_snapshot("c", &objs, &UsageMetrics::default(), 0);
+
+        let i = &snap.ingresses[0];
+        assert_eq!(i.class.as_deref(), Some("traefik"));
+        assert_eq!((i.tls_hosts.clone(), i.address.clone()), (vec!["shop.lan".to_string()], vec!["192.168.1.240".to_string()]));
+        let found: Vec<(&str, Option<&str>, bool)> = i.routes.iter().map(|r| (r.path.as_str(), r.port.as_deref(), r.service_found)).collect();
+        assert_eq!(found, [("/", Some("80"), true), ("/api", Some("http"), false)]);
+
+        let h = &snap.autoscalers[0];
+        assert_eq!((h.min_replicas, h.max_replicas, h.current_replicas), (2, 5, 5));
+        assert_eq!(h.metrics, ["cpu 95% / 80%"]);
+        assert!(h.at_max && h.problem.is_none());
+
+        let v = &snap.persistent_volumes[0];
+        assert_eq!(v.claim.as_deref(), Some("apps/data"));
+        assert_eq!(v.node.as_deref(), Some("node-a"));
+        assert_eq!(v.source.as_deref(), Some("hostPath /var/lib/rancher/k3s/storage/pvc-1"));
+
+        let c = &snap.storage_classes[0];
+        assert!(c.is_default);
+        assert_eq!(c.volumes, 1);
     }
 }

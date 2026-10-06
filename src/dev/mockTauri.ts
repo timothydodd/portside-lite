@@ -194,6 +194,36 @@ const issues: Issue[] = [
     actions: ["viewPreviousLogs", "viewLogs"],
     firstSeenMs: now - 5 * H,
   },
+  {
+    key: "ingress-missing-backend:Ingress/apps/web",
+    severity: "warning",
+    category: "network",
+    rule: "ingress-missing-backend",
+    kind: "Ingress",
+    namespace: "apps",
+    name: "web",
+    title: "Ingress routes to a missing Service: web",
+    detail: "No Service named report-ui in apps, so those routes return errors.",
+    hint: "Fix the backend service name in the Ingress, or deploy the Service it expects.",
+    sinceMs: null,
+    actions: [],
+    firstSeenMs: now - 5 * H,
+  },
+  {
+    key: "pv-released:PersistentVolume/pvc-77c1",
+    severity: "info",
+    category: "storage",
+    rule: "pv-released",
+    kind: "PersistentVolume",
+    namespace: null,
+    name: "pvc-77c1",
+    title: "PV kept after its claim was deleted: pvc-77c1",
+    detail: "10Gi from monitoring/prometheus-data is still on disk on k3s-server.",
+    hint: "Reclaim policy is Retain, so nothing removes it. Delete the PV (and its data) once you're sure it isn't needed.",
+    sinceMs: now - 12 * 86_400_000,
+    actions: [],
+    firstSeenMs: now - 12 * 86_400_000,
+  },
 ];
 
 function node(name: string, roles: string[], cpu: number, mem: number, memTotal: number) {
@@ -264,6 +294,26 @@ const snapshot: ClusterSnapshot = {
     { namespace: "apps", name: "billing-api", type: "ClusterIP", clusterIp: "10.43.40.2", external: [], ports: [{ name: null, port: 8080, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "billing-api" }, podsMatched: 2, idle: false, podsReady: 1, podNames: ["billing-api-7d9f8b6c5-x2k4p", "billing-api-7d9f8b6c5-q9z1m"], routes: ["shop.lan/api (web)"], createdMs: now - 30 * 86_400_000 },
     { namespace: "data", name: "postgres", type: "ClusterIP", clusterIp: "10.43.9.9", external: [], ports: [{ name: "pg", port: 5432, targetPort: null, nodePort: null, protocol: "TCP" }], selector: { app: "postgres" }, podsMatched: 0, idle: false, podsReady: 0, podNames: [], routes: [], createdMs: now - 1 * H },
     { namespace: "apps", name: "reports", type: "ClusterIP", clusterIp: "10.43.3.3", external: [], ports: [{ name: null, port: 80, targetPort: "8000", nodePort: null, protocol: "TCP" }], selector: { app: "reportz" }, podsMatched: 0, idle: false, podsReady: 0, podNames: [], routes: [], createdMs: now - 3 * 86_400_000 },
+  ],
+  ingresses: [
+    { namespace: "apps", name: "web", class: "traefik", routes: [
+      { host: "shop.lan", path: "/", service: "web-frontend", port: "80", resource: null, serviceFound: true },
+      { host: "shop.lan", path: "/api", service: "billing-api", port: "8080", resource: null, serviceFound: true },
+      { host: "shop.lan", path: "/reports", service: "report-ui", port: "http", resource: null, serviceFound: false },
+    ], tlsHosts: ["shop.lan"], address: ["192.168.1.240"], createdMs: now - 30 * 86_400_000 },
+  ],
+  autoscalers: [
+    { namespace: "apps", name: "web-frontend", targetKind: "Deployment", targetName: "web-frontend", minReplicas: 2, maxReplicas: 2, currentReplicas: 2, desiredReplicas: 2, metrics: ["cpu 92% / 70%"], problem: null, atMax: true, lastScaleMs: now - 3 * H, createdMs: now - 30 * 86_400_000 },
+    { namespace: "apps", name: "billing-api", targetKind: "Deployment", targetName: "billing-api", minReplicas: 1, maxReplicas: 6, currentReplicas: 2, desiredReplicas: 2, metrics: ["cpu ? / 80%"], problem: "the HPA was unable to compute the replica count: failed to get cpu utilization: missing request for cpu in container app", atMax: false, lastScaleMs: null, createdMs: now - 9 * 86_400_000 },
+  ],
+  persistentVolumes: [
+    { name: "pvc-1f2e", phase: "Bound", capacity: "20Gi", storageClass: "local-path", reclaimPolicy: "Delete", accessModes: ["ReadWriteOnce"], claim: "data/data-postgres-0", source: "hostPath /var/lib/rancher/k3s/storage/pvc-1f2e_data_data-postgres-0", node: "k3s-agent-1", message: null, phaseSinceMs: now - 30 * 86_400_000, createdMs: now - 30 * 86_400_000 },
+    { name: "pvc-9a8b", phase: "Bound", capacity: "5Gi", storageClass: "local-path", reclaimPolicy: "Delete", accessModes: ["ReadWriteOnce"], claim: "apps/legacy-uploads", source: "hostPath /var/lib/rancher/k3s/storage/pvc-9a8b_apps_legacy-uploads", node: "k3s-server", message: null, phaseSinceMs: now - 90 * 86_400_000, createdMs: now - 90 * 86_400_000 },
+    { name: "pvc-77c1", phase: "Released", capacity: "10Gi", storageClass: "local-path-retain", reclaimPolicy: "Retain", accessModes: ["ReadWriteOnce"], claim: "monitoring/prometheus-data", source: "hostPath /var/lib/rancher/k3s/storage/pvc-77c1_monitoring_prometheus-data", node: "k3s-server", message: null, phaseSinceMs: now - 12 * 86_400_000, createdMs: now - 120 * 86_400_000 },
+  ],
+  storageClasses: [
+    { name: "local-path", provisioner: "rancher.io/local-path", reclaimPolicy: "Delete", bindingMode: "WaitForFirstConsumer", allowExpansion: false, isDefault: true, volumes: 2, claims: 2, createdMs: now - 180 * 86_400_000 },
+    { name: "local-path-retain", provisioner: "rancher.io/local-path", reclaimPolicy: "Retain", bindingMode: "WaitForFirstConsumer", allowExpansion: false, isDefault: false, volumes: 1, claims: 0, createdMs: now - 150 * 86_400_000 },
   ],
   configs: [
     { kind: "ConfigMap", namespace: "apps", name: "billing-api-config", secretType: null, keys: ["DB_HOST", "LOG_LEVEL", "app.properties"], sizeBytes: 812, immutable: false, usedBy: ["Deployment/billing-api"], createdMs: now - 30 * 86_400_000 },
@@ -538,6 +588,11 @@ const handlers: Record<string, (a: Args) => unknown> = {
     const i = path.lastIndexOf("/");
     const [dir, name] = i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
     mockFiles[dir] = (mockFiles[dir] ?? []).filter((e) => e.name !== name);
+    return null;
+  },
+  delete_volume_claim: (a) => {
+    snapshot.volumes = snapshot.volumes.filter((v) => !(v.namespace === a.namespace && v.name === a.claim));
+    emitMock("cluster:snapshot", { ...snapshot });
     return null;
   },
   rename_volume_path: () => null,

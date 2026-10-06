@@ -183,6 +183,8 @@ export const releaseVolumeFiles = () => invoke<void>("release_volume_files");
 export const listVolumeFiles = (id: number, path: string) => invoke<FileListing>("list_volume_files", { id, path });
 export const makeVolumeDir = (id: number, dir: string, name: string) => invoke<void>("make_volume_dir", { id, dir, name });
 export const deleteVolumePath = (id: number, path: string) => invoke<void>("delete_volume_path", { id, path });
+export const deleteVolumeClaim = (namespace: string, claim: string) =>
+  invoke<void>("delete_volume_claim", { namespace, claim });
 export const renameVolumePath = (id: number, path: string, newName: string) =>
   invoke<void>("rename_volume_path", { id, path, newName });
 export const downloadVolumePath = (id: number, path: string, folder: boolean, dest: string, transferId: string) =>

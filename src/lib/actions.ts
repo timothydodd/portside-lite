@@ -112,6 +112,21 @@ export async function deleteWorkload(t: ActionTarget) {
   await attempt(`Deleted ${t.kind} ${t.name}`, () => ipc.deleteWorkload(t.kind, t.namespace ?? "", t.name));
 }
 
+/** Delete a PersistentVolumeClaim nothing uses (the backend re-checks). */
+export async function deleteVolumeClaim(v: { namespace: string; name: string; usedBy: string[] }) {
+  const refs = v.usedBy.length
+    ? `\n\nStill referenced by ${v.usedBy.join(", ")}, which won't start again without it.`
+    : "";
+  const ok = await confirmDestructive(
+    `Delete PersistentVolumeClaim ${v.namespace}/${v.name}?\n\nWith most storage classes (k3s local-path included) the volume and every file on it are deleted with it. This can't be undone.${refs}`,
+    "Delete storage",
+  );
+  if (!ok) return;
+  const nav = useNavStore.getState();
+  if (nav.files?.namespace === v.namespace && nav.files.claim === v.name) nav.closeFiles();
+  await attempt(`Deleted ${v.name}`, () => ipc.deleteVolumeClaim(v.namespace, v.name));
+}
+
 export async function scaleTo(t: ActionTarget, replicas: number) {
   if (replicas === 0 && !(await confirmDestructive(`Scale ${t.name} to 0? It will stop serving entirely.`, "Scale to zero"))) {
     return;

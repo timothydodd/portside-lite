@@ -507,12 +507,25 @@ fn detect_workloads(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     }
 
     for v in &snap.volumes {
+        // Only say a class is missing when we could list classes at all.
+        let missing_class = v
+            .storage_class
+            .as_deref()
+            .filter(|c| !snap.storage_classes.is_empty() && !snap.storage_classes.iter().any(|sc| sc.name == *c));
+        let pending_detail = match missing_class {
+            Some(c) => format!("Claim isn't bound to a volume. StorageClass \"{c}\" doesn't exist."),
+            None => "Claim isn't bound to a volume.".to_string(),
+        };
         let (sev, rule, detail, hint) = match v.phase.as_str() {
             "Pending" => (
                 Severity::Warning,
                 "pvc-pending",
-                "Claim isn't bound to a volume.",
-                "Check the StorageClass exists and its provisioner (local-path on k3s) is running.",
+                pending_detail.as_str(),
+                if missing_class.is_some() {
+                    "Point the claim at a class that exists (see Storage → Storage classes), or create the class."
+                } else {
+                    "Check the StorageClass exists and its provisioner (local-path on k3s) is running."
+                },
             ),
             "Lost" => (
                 Severity::Critical,
@@ -534,6 +547,123 @@ fn detect_workloads(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
             detail: detail.into(),
             hint: Some(hint.into()),
             since_ms: v.created_ms,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+
+    for pv in &snap.persistent_volumes {
+        let released_for = pv.phase_since_ms.map(|t| now - t);
+        let (sev, rule, title, detail, hint) = match (pv.phase.as_str(), pv.reclaim_policy.as_deref()) {
+            ("Failed", _) => (
+                Severity::Warning,
+                "pv-failed",
+                format!("PV failed: {}", pv.name),
+                pv.message.clone().unwrap_or_else(|| "Reclaiming the volume failed.".into()),
+                "The provisioner couldn't clean it up. Check its logs (local-path-provisioner on k3s), then remove the data and the PV by hand.",
+            ),
+            // Delete policy: the provisioner should remove it within moments.
+            ("Released", Some("Delete")) if released_for.is_some_and(|t| t > STARTUP_GRACE_MS) => (
+                Severity::Warning,
+                "pv-released-stuck",
+                format!("PV not cleaned up: {}", pv.name),
+                format!("Its claim {} is gone but the volume wasn't deleted.", pv.claim.as_deref().unwrap_or("?")),
+                "Check the provisioner's logs (local-path-provisioner on k3s).",
+            ),
+            ("Released", Some("Retain")) => (
+                Severity::Info,
+                "pv-released",
+                format!("PV kept after its claim was deleted: {}", pv.name),
+                format!(
+                    "{} from {} is still on disk{}.",
+                    pv.capacity.as_deref().unwrap_or("Its data"),
+                    pv.claim.as_deref().unwrap_or("a deleted claim"),
+                    pv.node.as_deref().map(|n| format!(" on {n}")).unwrap_or_default()
+                ),
+                "Reclaim policy is Retain, so nothing removes it. Delete the PV (and its data) once you're sure it isn't needed.",
+            ),
+            _ => continue,
+        };
+        out.push(Issue {
+            key: format!("{rule}:PersistentVolume/{}", pv.name),
+            severity: sev,
+            category: "storage".into(),
+            rule: rule.into(),
+            kind: "PersistentVolume".into(),
+            namespace: None,
+            name: pv.name.clone(),
+            title,
+            detail,
+            hint: Some(hint.into()),
+            since_ms: pv.phase_since_ms,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+
+    for h in &snap.autoscalers {
+        let (sev, rule, title, detail, hint) = if let Some(problem) = &h.problem {
+            // Metrics aren't there for a new HPA or freshly started pods yet.
+            if h.created_ms.is_some_and(|c| now - c < STARTUP_GRACE_MS) {
+                continue;
+            }
+            (
+                Severity::Warning,
+                "hpa-cannot-scale",
+                format!("Autoscaler can't scale: {}", h.name),
+                problem.clone(),
+                "Usually missing metrics: check metrics-server is running and the target's containers set resource requests.",
+            )
+        } else if h.at_max {
+            (
+                Severity::Info,
+                "hpa-at-max",
+                format!("Autoscaler at its maximum: {}", h.name),
+                format!("{}/{} wants more than {} replicas ({}).", h.target_kind, h.target_name, h.max_replicas, h.metrics.join(", ")),
+                "Load is above what max replicas allows. Raise maxReplicas or give the pods more resources.",
+            )
+        } else {
+            continue;
+        };
+        out.push(Issue {
+            key: format!("{rule}:HorizontalPodAutoscaler/{}/{}", h.namespace, h.name),
+            severity: sev,
+            category: "workload".into(),
+            rule: rule.into(),
+            kind: "HorizontalPodAutoscaler".into(),
+            namespace: Some(h.namespace.clone()),
+            name: h.name.clone(),
+            title,
+            detail,
+            hint: Some(hint.into()),
+            since_ms: None,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+}
+
+/// Ingress rules that send traffic to a Service that doesn't exist.
+fn detect_ingresses(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for ing in &snap.ingresses {
+        let mut missing: Vec<&str> = ing.routes.iter().filter(|r| !r.service_found).filter_map(|r| r.service.as_deref()).collect();
+        missing.sort();
+        missing.dedup();
+        if missing.is_empty() {
+            continue;
+        }
+        out.push(Issue {
+            key: format!("ingress-missing-backend:Ingress/{}/{}", ing.namespace, ing.name),
+            severity: Severity::Warning,
+            category: "network".into(),
+            rule: "ingress-missing-backend".into(),
+            kind: "Ingress".into(),
+            namespace: Some(ing.namespace.clone()),
+            name: ing.name.clone(),
+            title: format!("Ingress routes to a missing Service: {}", ing.name),
+            detail: format!("No Service named {} in {}, so those routes return errors.", missing.join(", "), ing.namespace),
+            hint: Some("Fix the backend service name in the Ingress, or deploy the Service it expects.".into()),
+            since_ms: None,
             actions: vec![],
             first_seen_ms: None,
         });
@@ -580,6 +710,26 @@ fn detect_services(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
     }
 }
 
+/// A readiness/startup probe that failed only while the pod's containers were
+/// starting (scale-up, rollout): the probe ran before the app was listening.
+/// If it keeps failing past the grace period, later events fall outside the
+/// window and the issue shows up. Liveness failures always count.
+fn startup_probe_noise(e: &EventInfo, snap: &ClusterSnapshot) -> bool {
+    if e.reason != "Unhealthy" || e.object_kind != "Pod" {
+        return false;
+    }
+    if !(e.message.starts_with("Readiness probe") || e.message.starts_with("Startup probe")) {
+        return false;
+    }
+    let Some(p) = snap.pods.iter().find(|p| p.namespace == e.namespace && p.name == e.object_name) else { return false };
+    // A restarted container probes from scratch, so measure from the latest start.
+    let started = p.containers.iter().filter(|c| !c.init).filter_map(|c| c.started_ms).max().or(p.created_ms);
+    match (started, e.last_ms) {
+        (Some(s), Some(last)) => last - s <= STARTUP_GRACE_MS,
+        _ => false,
+    }
+}
+
 fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     // Group by (object, reason) so a flapping probe is one issue, not fifty.
     // (count, newest event, earliest first-seen)
@@ -592,7 +742,7 @@ fn detect_events(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
         if e.object_kind == "Pod" && !snap.pods.iter().any(|p| p.namespace == e.namespace && p.name == e.object_name) {
             continue;
         }
-        if !EVENT_REASONS.iter().any(|(r, _)| *r == e.reason) {
+        if !EVENT_REASONS.iter().any(|(r, _)| *r == e.reason) || startup_probe_noise(e, snap) {
             continue;
         }
         let key = (
@@ -644,6 +794,7 @@ pub fn detect(snap: &ClusterSnapshot, settings: &Settings, now_ms: i64) -> Vec<I
     detect_pods(snap, settings, now_ms, &mut out);
     detect_workloads(snap, now_ms, &mut out);
     detect_services(snap, &mut out);
+    detect_ingresses(snap, &mut out);
     detect_events(snap, now_ms, &mut out);
     sort_dedupe(&mut out);
     out
@@ -871,6 +1022,29 @@ mod tests {
     }
 
     #[test]
+    fn readiness_failures_while_starting_are_ignored() {
+        let started = NOW - 10 * 60 * 1000;
+        let ev = |message: &str, last_ms: i64| EventInfo {
+            namespace: "default".into(),
+            object_kind: "Pod".into(),
+            object_name: "api".into(),
+            reason: "Unhealthy".into(),
+            message: message.into(),
+            count: 1,
+            first_ms: Some(started + 2_000),
+            last_ms: Some(last_ms),
+            ..Default::default()
+        };
+        let mut p = pod("api");
+        p.containers.push(ContainerInfo { name: "app".into(), state: "running".into(), started_ms: Some(started), ..Default::default() });
+        let count = |e: EventInfo| detect(&ClusterSnapshot { pods: vec![p.clone()], events: vec![e], ..Default::default() }, &Settings::default(), NOW).len();
+        assert_eq!(count(ev("Readiness probe failed: connection refused", started + 5_000)), 0, "app not listening yet");
+        assert_eq!(count(ev("Startup probe failed: connection refused", started + 5_000)), 0);
+        assert_eq!(count(ev("Readiness probe failed: timeout", started + STARTUP_GRACE_MS + 60_000)), 1, "still failing after startup");
+        assert_eq!(count(ev("Liveness probe failed: connection refused", started + 5_000)), 1, "liveness failures restart the container");
+    }
+
+    #[test]
     fn events_for_pods_that_are_gone_are_dropped() {
         let ev = |name: &str| EventInfo {
             namespace: "default".into(),
@@ -886,5 +1060,55 @@ mod tests {
         let snap = ClusterSnapshot { pods: vec![pod("here")], events: vec![ev("here"), ev("replaced")], ..Default::default() };
         let names: Vec<String> = detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["here"]);
+    }
+
+    #[test]
+    fn ingress_hpa_and_volume_rules() {
+        let ing = IngressInfo {
+            namespace: "apps".into(),
+            name: "web".into(),
+            routes: vec![
+                IngressRoute { host: "a".into(), path: "/".into(), service: Some("web".into()), service_found: true, ..Default::default() },
+                IngressRoute { host: "a".into(), path: "/x".into(), service: Some("gone".into()), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let hpa = |problem: Option<&str>, at_max, created_ms| AutoscalerInfo {
+            namespace: "apps".into(),
+            name: "web".into(),
+            problem: problem.map(str::to_string),
+            at_max,
+            created_ms: Some(created_ms),
+            ..Default::default()
+        };
+        let pv = |phase: &str, policy: &str, since| PersistentVolumeInfo {
+            name: format!("pv-{phase}-{policy}"),
+            phase: phase.into(),
+            reclaim_policy: Some(policy.into()),
+            phase_since_ms: Some(since),
+            ..Default::default()
+        };
+        let snap = ClusterSnapshot {
+            ingresses: vec![ing],
+            autoscalers: vec![hpa(Some("missing metrics"), false, 0), hpa(None, true, 0)],
+            persistent_volumes: vec![
+                pv("Released", "Retain", 0),
+                pv("Released", "Delete", NOW - 10_000),
+                pv("Released", "Delete", 0),
+                pv("Bound", "Delete", 0),
+            ],
+            storage_classes: vec![StorageClassInfo { name: "local-path".into(), ..Default::default() }],
+            volumes: vec![VolumeClaimInfo { namespace: "apps".into(), name: "data".into(), phase: "Pending".into(), storage_class: Some("fast".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        let issues = detect(&snap, &Settings::default(), NOW);
+        let mut rules: Vec<&str> = issues.iter().map(|i| i.rule.as_str()).collect();
+        rules.sort();
+        assert_eq!(rules, ["hpa-at-max", "hpa-cannot-scale", "ingress-missing-backend", "pv-released", "pv-released-stuck", "pvc-pending"]);
+        assert!(issues.iter().find(|i| i.rule == "ingress-missing-backend").unwrap().detail.contains("gone"));
+        assert!(issues.iter().find(|i| i.rule == "pvc-pending").unwrap().detail.contains("\"fast\" doesn't exist"));
+
+        let young = ClusterSnapshot { autoscalers: vec![hpa(Some("missing metrics"), false, NOW - 30_000)], ..Default::default() };
+        assert!(detect(&young, &Settings::default(), NOW).is_empty(), "a new HPA has no metrics yet");
     }
 }

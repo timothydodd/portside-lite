@@ -9,8 +9,12 @@ a plain-language next step and, where possible, a button for it.
 - OOMKills, unschedulable or stuck Pending pods, not-ready pods, pods stuck Terminating
 - NotReady nodes, memory/disk/PID pressure, high CPU or memory
 - Degraded or down Deployments, StatefulSets and DaemonSets, and failed Jobs
-- Pending or Lost PVCs; probe failures, mount failures and evictions (from events)
-- Services with no endpoints
+- Pending or Lost PVCs (including ones that name a StorageClass that doesn't exist); Failed
+  PersistentVolumes, Released ones that weren't cleaned up, and Released ones kept by a Retain policy
+- Autoscalers that can't scale (usually missing metrics or resource requests) or are stuck at their
+  maximum
+- Probe failures (readiness failures while a pod is still starting are ignored), mount failures and evictions (from events)
+- Services with no endpoints, and Ingress routes that point at a Service that doesn't exist
 - Error-log spikes per pod
 
 **History.** The app records when each problem started and resolved, and which ones keep coming
@@ -42,6 +46,12 @@ back.
 
 - **Services** show live endpoint health: how many pods each selector matches and how many of them are
   Ready. They also list the Ingress routes that point at each Service.
+- **Ingresses** (a tab on Services) list every host/path with the Service and port it routes to,
+  which hosts have TLS, and the address the ingress controller published. Routes to a missing
+  Service are marked.
+- **Autoscalers** (a tab on Workloads) show each HPA's target, current replicas within its min–max,
+  and each metric's current value against its target. Workloads with an HPA show "auto min–max"
+  under their replica count.
 - **ConfigMaps and Secrets** list their key names and the workloads that use them. The key/value
   editor decodes Secret values and masks them. After you save, it offers to restart the workloads
   that use the object.
@@ -64,6 +74,13 @@ The **Storage** page lists every PersistentVolumeClaim with:
 - the workloads and pods that use it
 - whether its files can be changed right now
 
+Two more tabs cover what's behind the claims:
+
+- **Volumes**: every PersistentVolume with its claim, reclaim policy, and where the data lives (node
+  and host path for local-path). A Released volume with a Retain policy still holds its data.
+- **Storage classes**: provisioner, reclaim policy, binding mode, whether volumes can grow, which
+  class is the default, and how many volumes and claims use each.
+
 **Browsing.** Use **Browse** on the Storage page, or the **Files** tab on a workload that mounts a
 volume. You can:
 
@@ -79,6 +96,10 @@ and delete. This is only allowed while nothing else is using the volume:
 
 Otherwise the browser is read-only and lists what's in the way. The check runs again right before
 every change, so scaling the app back up turns writing off immediately.
+
+**Deleting storage.** The row menu on the Storage page has **Delete storage**. It follows the same
+rule as changing files: the claim must not be in use. With most storage classes (k3s `local-path`
+included) the volume and its files are deleted with the claim, so this can't be undone.
 
 **How it works.** The app starts a small helper pod that mounts the volume. Close the browser before
 scaling the app back up: while the browser is open the volume stays attached to that pod, and on

@@ -832,6 +832,13 @@ pub async fn delete_volume_path(state: State<'_, AppState>, id: u64, path: Strin
 }
 
 #[tauri::command]
+pub async fn delete_volume_claim(state: State<'_, AppState>, namespace: String, claim: String) -> CmdResult<()> {
+    state.monitor.delete_claim(&namespace, &claim).await?;
+    state.monitor.refresh_now();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn rename_volume_path(state: State<'_, AppState>, id: u64, path: String, new_name: String) -> CmdResult<()> {
     state.monitor.rename_path(id, &path, &new_name).await
 }

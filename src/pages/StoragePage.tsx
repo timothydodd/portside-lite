@@ -1,38 +1,61 @@
 import { useMemo, useState } from "react";
-import { FileCode2, FolderOpen, Lock, ShieldCheck } from "lucide-react";
+import { FileCode2, FolderOpen, Lock, ShieldCheck, Trash2 } from "lucide-react";
+import { deleteVolumeClaim } from "../lib/actions";
 import { fmtAge } from "../lib/format";
 import type { VolumeClaimInfo } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
-import { EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
+import { PersistentVolumeTable, SHORT_MODES, StorageClassTable } from "../components/StorageTables";
+import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useNavStore } from "../stores/nav";
 
-const SHORT_MODES: Record<string, string> = {
-  ReadWriteOnce: "RWO",
-  ReadOnlyMany: "ROX",
-  ReadWriteMany: "RWX",
-  ReadWriteOncePod: "RWOP",
+type Tab = "claims" | "volumes" | "classes";
+
+const SUBTITLES: Record<Tab, string> = {
+  claims: "browse files on any claim; changing files or deleting one needs the apps using it scaled to 0",
+  volumes: "the disks behind claims; a Released volume with a Retain policy still holds data",
+  classes: "how new claims get their volumes",
 };
 
 export default function StoragePage() {
+  const [tab, setTab] = useState<Tab>("claims");
   const [namespace, setNamespace] = useState("");
   const [search, setSearch] = useState("");
   return (
     <SnapshotGate>
-      {(s) => (
-        <StorageTable volumes={s.volumes} namespaces={s.namespaces} {...{ namespace, setNamespace, search, setSearch }} />
-      )}
+      {(s) => {
+        const tabs: [Tab, string, number][] = [
+          ["claims", "Claims", s.volumes.length],
+          ["volumes", "Volumes", s.persistentVolumes.length],
+          ["classes", "Storage classes", s.storageClasses.length],
+        ];
+        return (
+          <div className="flex h-full flex-col">
+            <PageHeader title="Storage" subtitle={SUBTITLES[tab]}>
+              {tab !== "classes" && <NamespaceSelect namespaces={s.namespaces} value={namespace} onChange={setNamespace} />}
+              <SearchInput value={search} onChange={setSearch} placeholder={tab === "classes" ? "Name or provisioner…" : "Name, claim or class…"} className="w-56" />
+            </PageHeader>
+            <div className="flex gap-1 border-b border-border-light px-6">
+              {tabs.map(([t, label, count]) => (
+                <button key={t} className={`navtab ${tab === t ? "navtab-active" : ""}`} onClick={() => setTab(t)}>
+                  {label} <span className="text-content-muted">{count}</span>
+                </button>
+              ))}
+            </div>
+            {tab === "claims" ? (
+              <ClaimTable volumes={s.volumes} namespace={namespace} search={search} />
+            ) : tab === "volumes" ? (
+              <PersistentVolumeTable volumes={s.persistentVolumes} namespace={namespace} search={search} />
+            ) : (
+              <StorageClassTable classes={s.storageClasses} search={search} />
+            )}
+          </div>
+        );
+      }}
     </SnapshotGate>
   );
 }
 
-function StorageTable(p: {
-  volumes: VolumeClaimInfo[];
-  namespaces: string[];
-  namespace: string;
-  setNamespace: (v: string) => void;
-  search: string;
-  setSearch: (v: string) => void;
-}) {
+function ClaimTable(p: { volumes: VolumeClaimInfo[]; namespace: string; search: string }) {
   const { openFiles, openWorkload, openPod, openEditor } = useNavStore();
   const rows = useMemo(() => {
     const q = p.search.toLowerCase();
@@ -43,11 +66,7 @@ function StorageTable(p: {
   const now = Date.now();
 
   return (
-    <div className="flex h-full flex-col">
-      <PageHeader title="Storage" subtitle={`${rows.length} of ${p.volumes.length} PersistentVolumeClaims · browse files on any of them; changing files needs the apps using it scaled to 0`}>
-        <NamespaceSelect namespaces={p.namespaces} value={p.namespace} onChange={p.setNamespace} />
-        <SearchInput value={p.search} onChange={p.setSearch} placeholder="Name, workload or class…" className="w-56" />
-      </PageHeader>
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
         {rows.length === 0 ? (
           <EmptyState title="No PersistentVolumeClaims">{p.volumes.length ? "Nothing matches the filter." : "Nothing on this cluster asks for persistent storage."}</EmptyState>
@@ -114,17 +133,31 @@ function StorageTable(p: {
                     </td>
                     <td className="text-right text-xs text-content-muted">{fmtAge(v.createdMs, now)}</td>
                     <td className="whitespace-nowrap text-right">
-                      <button
-                        className="btn-quiet"
-                        disabled={!bound}
-                        title={bound ? "Browse files" : "Not bound to a volume yet"}
-                        onClick={() => openFiles(v.namespace, v.name)}
-                      >
-                        <FolderOpen size={14} />
-                      </button>
-                      <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: "PersistentVolumeClaim", namespace: v.namespace, name: v.name })}>
-                        <FileCode2 size={14} />
-                      </button>
+                      <ActionMenu
+                        label={`Actions for ${v.name}`}
+                        items={[
+                          {
+                            label: "Browse files",
+                            icon: <FolderOpen size={14} />,
+                            disabled: !bound,
+                            title: bound ? undefined : "Not bound to a volume yet",
+                            onSelect: () => openFiles(v.namespace, v.name),
+                          },
+                          {
+                            label: "Edit YAML",
+                            icon: <FileCode2 size={14} />,
+                            onSelect: () => openEditor({ kind: "PersistentVolumeClaim", namespace: v.namespace, name: v.name }),
+                          },
+                          {
+                            label: "Delete storage…",
+                            icon: <Trash2 size={14} />,
+                            danger: true,
+                            disabled: v.writeBlockers.length > 0,
+                            title: v.writeBlockers.length ? `Still in use:\n${v.writeBlockers.join("\n")}` : "Delete the claim and its volume",
+                            onSelect: () => void deleteVolumeClaim(v),
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 );

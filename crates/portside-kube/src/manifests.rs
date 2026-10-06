@@ -29,6 +29,7 @@ fn group_version(kind: &str) -> Result<(&'static str, &'static str)> {
         "Job" | "CronJob" => ("batch", "v1"),
         "Ingress" => ("networking.k8s.io", "v1"),
         "HorizontalPodAutoscaler" => ("autoscaling", "v2"),
+        "StorageClass" => ("storage.k8s.io", "v1"),
         "Pod" | "Service" | "ConfigMap" | "Secret" | "PersistentVolumeClaim" | "PersistentVolume" | "ServiceAccount" | "Namespace"
         | "Node" | "Event" | "Endpoints" => ("", "v1"),
         _ => return Err(other(format!("{kind} objects aren't handled here"))),
@@ -117,6 +118,8 @@ pub async fn apply_edit(
     if yaml.split("\n---").filter(|d| !d.trim().is_empty()).count() > 1 {
         return Err(other("The editor holds one object; remove the extra `---` documents."));
     }
+    // Cluster-scoped objects (PersistentVolume, StorageClass) come with an empty namespace.
+    let expected_namespace = expected_namespace.filter(|n| !n.is_empty());
     let obj: DynamicObject = serde_yaml::from_str(yaml).map_err(|e| other(format!("Invalid YAML: {e}")))?;
     check_edit(&obj, expected_kind, expected_namespace, expected_name).map_err(other)?;
     let types = obj.types.clone().ok_or_else(|| other("apiVersion and kind are required"))?;

@@ -284,6 +284,28 @@ impl Monitor {
         futures::future::join_all(entries.iter().map(stop)).await;
     }
 
+    /// Delete a claim on the active cluster. Same rule as writing files: only
+    /// while nothing uses it (checked live). Its file browser sessions end.
+    pub async fn delete_claim(&self, namespace: &str, claim: &str) -> Result<(), String> {
+        let profile_id = self.settings().active_connection_id.ok_or("No cluster connection configured.")?;
+        let client = self.client().await?;
+        let users = kube_files::claim_users(&client.client, namespace, claim).await.map_err(err)?;
+        if !users.blockers.is_empty() {
+            return Err(format!("{claim} is still in use. {}", users.blockers.join(" ")));
+        }
+        let closed: Vec<SessionEntry> = {
+            let mut sessions = self.file_sessions.lock().await;
+            let ids: Vec<u64> = sessions
+                .values()
+                .filter(|e| e.info.profile_id == profile_id && e.info.namespace == namespace && e.info.claim == claim)
+                .map(|e| e.info.id)
+                .collect();
+            ids.iter().filter_map(|id| sessions.remove(id)).collect()
+        };
+        futures::future::join_all(closed.iter().map(stop)).await;
+        kube_files::delete_claim(&client.client, namespace, claim).await.map_err(err)
+    }
+
     async fn session(&self, id: u64) -> Result<(Arc<ClusterClient>, FileSession), String> {
         let sessions = self.file_sessions.lock().await;
         let e = sessions.get(&id).ok_or("That file browser was closed. Reopen the volume.")?;

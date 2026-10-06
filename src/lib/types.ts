@@ -147,6 +147,76 @@ export interface ServiceInfo {
   createdMs: number | null;
 }
 
+export interface IngressRoute {
+  /** "*" when the rule has no host; "(default)" for the default backend. */
+  host: string;
+  path: string;
+  service: string | null;
+  /** Port number or name. */
+  port: string | null;
+  /** A non-Service backend, as "Kind/name". */
+  resource: string | null;
+  serviceFound: boolean;
+}
+
+export interface IngressInfo {
+  namespace: string;
+  name: string;
+  class: string | null;
+  routes: IngressRoute[];
+  tlsHosts: string[];
+  address: string[];
+  createdMs: number | null;
+}
+
+export interface AutoscalerInfo {
+  namespace: string;
+  name: string;
+  targetKind: string;
+  targetName: string;
+  minReplicas: number;
+  maxReplicas: number;
+  currentReplicas: number;
+  desiredReplicas: number;
+  /** "cpu 45% / 80%", … */
+  metrics: string[];
+  /** Why it can't scale (a False AbleToScale/ScalingActive condition). */
+  problem: string | null;
+  /** Wants more than maxReplicas. */
+  atMax: boolean;
+  lastScaleMs: number | null;
+  createdMs: number | null;
+}
+
+export interface PersistentVolumeInfo {
+  name: string;
+  phase: "Available" | "Bound" | "Released" | "Failed" | "Pending" | string;
+  capacity: string | null;
+  storageClass: string | null;
+  reclaimPolicy: string | null;
+  accessModes: string[];
+  /** "namespace/name" of the claim it's (or was) bound to. */
+  claim: string | null;
+  /** "hostPath /var/lib/…", "nfs host:/path", "csi driver", … */
+  source: string | null;
+  node: string | null;
+  message: string | null;
+  phaseSinceMs: number | null;
+  createdMs: number | null;
+}
+
+export interface StorageClassInfo {
+  name: string;
+  provisioner: string;
+  reclaimPolicy: string | null;
+  bindingMode: string | null;
+  allowExpansion: boolean;
+  isDefault: boolean;
+  volumes: number;
+  claims: number;
+  createdMs: number | null;
+}
+
 export interface ConfigInfo {
   kind: "ConfigMap" | "Secret";
   namespace: string;
@@ -214,6 +284,10 @@ export interface ClusterSnapshot {
   workloads: WorkloadInfo[];
   volumes: VolumeClaimInfo[];
   services: ServiceInfo[];
+  ingresses: IngressInfo[];
+  autoscalers: AutoscalerInfo[];
+  persistentVolumes: PersistentVolumeInfo[];
+  storageClasses: StorageClassInfo[];
   /** ConfigMaps and Secrets: key names and sizes only. */
   configs: ConfigInfo[];
   events: EventInfo[];

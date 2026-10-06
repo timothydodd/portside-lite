@@ -4,6 +4,7 @@ import { ForwardsPanel } from "../components/Forwards";
 import { useClusterStore } from "../stores/cluster";
 import { fmtAge } from "../lib/format";
 import type { ServiceInfo, ServicePort } from "../lib/types";
+import IngressTable from "../components/IngressTable";
 import SnapshotGate from "../components/SnapshotGate";
 import { EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useNavStore } from "../stores/nav";
@@ -25,33 +26,43 @@ function portLabel(p: ServicePort): string {
   return `${p.port}${target}/${p.protocol}${node}`;
 }
 
+type Tab = "services" | "ingresses";
+
 export default function ServicesPage() {
+  const [tab, setTab] = useState<Tab>("services");
   const [namespace, setNamespace] = useState("");
   const [search, setSearch] = useState("");
   return (
     <SnapshotGate>
       {(s) => (
-        <ServicesTable
-          services={s.services}
-          namespaces={s.namespaces}
-          namespace={namespace}
-          setNamespace={setNamespace}
-          search={search}
-          setSearch={setSearch}
-        />
+        <div className="flex h-full flex-col">
+          <PageHeader
+            title="Services"
+            subtitle={tab === "services" ? "endpoint health is computed from the pods each selector matches" : "routes into the cluster and the Services they send traffic to"}
+          >
+            <NamespaceSelect namespaces={s.namespaces} value={namespace} onChange={setNamespace} />
+            <SearchInput value={search} onChange={setSearch} placeholder={tab === "services" ? "Name or IP…" : "Name, host or service…"} className="w-56" />
+          </PageHeader>
+          <div className="flex gap-1 border-b border-border-light px-6">
+            <button className={`navtab ${tab === "services" ? "navtab-active" : ""}`} onClick={() => setTab("services")}>
+              Services <span className="text-content-muted">{s.services.length}</span>
+            </button>
+            <button className={`navtab ${tab === "ingresses" ? "navtab-active" : ""}`} onClick={() => setTab("ingresses")}>
+              Ingresses <span className="text-content-muted">{s.ingresses.length}</span>
+            </button>
+          </div>
+          {tab === "services" ? (
+            <ServicesTable services={s.services} namespace={namespace} search={search} />
+          ) : (
+            <IngressTable ingresses={s.ingresses} namespace={namespace} search={search} />
+          )}
+        </div>
       )}
     </SnapshotGate>
   );
 }
 
-function ServicesTable(p: {
-  services: ServiceInfo[];
-  namespaces: string[];
-  namespace: string;
-  setNamespace: (v: string) => void;
-  search: string;
-  setSearch: (v: string) => void;
-}) {
+function ServicesTable(p: { services: ServiceInfo[]; namespace: string; search: string }) {
   const { openPod, openEditor, openForward } = useNavStore();
   const forwards = useClusterStore((s) => s.forwards);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -64,11 +75,7 @@ function ServicesTable(p: {
   const now = Date.now();
 
   return (
-    <div className="flex h-full flex-col">
-      <PageHeader title="Services" subtitle={`${rows.length} of ${p.services.length} · endpoint health is computed from the pods each selector matches`}>
-        <NamespaceSelect namespaces={p.namespaces} value={p.namespace} onChange={p.setNamespace} />
-        <SearchInput value={p.search} onChange={p.setSearch} placeholder="Name or IP…" className="w-56" />
-      </PageHeader>
+    <div className="flex min-h-0 flex-1 flex-col">
       <ForwardsPanel />
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="table">

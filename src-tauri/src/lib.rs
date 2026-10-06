@@ -223,6 +223,7 @@ pub fn run() {
             commands::list_volume_files,
             commands::make_volume_dir,
             commands::delete_volume_path,
+            commands::delete_volume_claim,
             commands::rename_volume_path,
             commands::download_volume_path,
             commands::upload_volume_files,

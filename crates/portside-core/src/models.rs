@@ -17,6 +17,10 @@ pub struct ClusterSnapshot {
     pub workloads: Vec<WorkloadInfo>,
     pub volumes: Vec<VolumeClaimInfo>,
     pub services: Vec<ServiceInfo>,
+    pub ingresses: Vec<IngressInfo>,
+    pub autoscalers: Vec<AutoscalerInfo>,
+    pub persistent_volumes: Vec<PersistentVolumeInfo>,
+    pub storage_classes: Vec<StorageClassInfo>,
     /// ConfigMaps and Secrets. Key names and sizes only, never values.
     pub configs: Vec<ConfigInfo>,
     /// Recent Warning events, newest first.
@@ -213,6 +217,93 @@ pub struct ServiceInfo {
     pub pod_names: Vec<String>,
     /// "host/path (ingress-name)" for each Ingress rule routing here.
     pub routes: Vec<String>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressRoute {
+    /// "*" when the rule has no host; "(default)" for the default backend.
+    pub host: String,
+    pub path: String,
+    pub service: Option<String>,
+    /// Port number or name.
+    pub port: Option<String>,
+    /// A non-Service backend (`resource:`), as "Kind/name".
+    pub resource: Option<String>,
+    /// The backend Service exists in the Ingress's namespace.
+    pub service_found: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressInfo {
+    pub namespace: String,
+    pub name: String,
+    pub class: Option<String>,
+    pub routes: Vec<IngressRoute>,
+    /// Hosts covered by a `tls:` entry.
+    pub tls_hosts: Vec<String>,
+    /// Load-balancer IPs/hostnames the controller published.
+    pub address: Vec<String>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoscalerInfo {
+    pub namespace: String,
+    pub name: String,
+    pub target_kind: String,
+    pub target_name: String,
+    pub min_replicas: i32,
+    pub max_replicas: i32,
+    pub current_replicas: i32,
+    pub desired_replicas: i32,
+    /// "cpu 45% / 80%", "memory 300Mi / 500Mi", …
+    pub metrics: Vec<String>,
+    /// Message of a False `AbleToScale` / `ScalingActive` condition.
+    pub problem: Option<String>,
+    /// `ScalingLimited` is True because it wants more than `max_replicas`.
+    pub at_max: bool,
+    pub last_scale_ms: Option<i64>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentVolumeInfo {
+    pub name: String,
+    /// Available | Bound | Released | Failed | Pending
+    pub phase: String,
+    pub capacity: Option<String>,
+    pub storage_class: Option<String>,
+    /// Retain | Delete | Recycle
+    pub reclaim_policy: Option<String>,
+    pub access_modes: Vec<String>,
+    /// "namespace/name" of the claim it's (or was) bound to.
+    pub claim: Option<String>,
+    /// Where the data lives: "hostPath /var/lib/…", "nfs host:/path", "csi driver.example", …
+    pub source: Option<String>,
+    /// Node it's pinned to (local volumes / local-path).
+    pub node: Option<String>,
+    pub message: Option<String>,
+    /// When it entered its current phase (`lastPhaseTransitionTime`).
+    pub phase_since_ms: Option<i64>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageClassInfo {
+    pub name: String,
+    pub provisioner: String,
+    pub reclaim_policy: Option<String>,
+    pub binding_mode: Option<String>,
+    pub allow_expansion: bool,
+    pub is_default: bool,
+    pub volumes: usize,
+    pub claims: usize,
     pub created_ms: Option<i64>,
 }
 
