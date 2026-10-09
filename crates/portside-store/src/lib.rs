@@ -322,7 +322,19 @@ impl Store {
             },
             None => Settings::default(),
         };
+        drop(conn);
+        // Saved before credentials were encrypted: encrypt them now.
+        let plaintext = portside_secrets::AVAILABLE
+            && settings.secrets_mut().iter().any(|v| !v.is_empty() && !portside_secrets::is_protected(v));
+        for v in settings.secrets_mut() {
+            // One that can't be decrypted (another Windows account or computer)
+            // is dropped: the user types it again.
+            *v = portside_secrets::unprotect(v).unwrap_or_default();
+        }
         settings.normalize();
+        if plaintext {
+            self.save_settings(&settings)?;
+        }
         Ok(settings)
     }
 
@@ -343,8 +355,15 @@ impl Store {
         Ok(id)
     }
 
+    /// Credentials are encrypted where the platform can (see `portside-secrets`).
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
-        let json = serde_json::to_string(settings)?;
+        let mut stored = settings.clone();
+        for v in stored.secrets_mut().into_iter().filter(|v| !v.is_empty()) {
+            if let Some(p) = portside_secrets::protect(v) {
+                *v = p;
+            }
+        }
+        let json = serde_json::to_string(&stored)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -1185,6 +1204,50 @@ mod tests {
         let id = s.install_id().unwrap();
         assert_eq!(id.len(), 16);
         assert_eq!(s.install_id().unwrap(), id);
+    }
+
+    fn with_password(pw: &str) -> Settings {
+        let json = format!(
+            r#"{{"connections":[{{"id":"a","name":"a","connection":{{"mode":"ssh","host":"h","username":"u","auth":{{"kind":"password","password":"{pw}"}},"sudoPassword":"{pw}-sudo"}}}}]}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn raw_settings(s: &Store) -> String {
+        s.conn.lock().unwrap().query_row("SELECT value FROM settings WHERE key = ?1", [SETTINGS_KEY], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn credentials_round_trip_and_are_encrypted_where_possible() {
+        let s = Store::open_in_memory().unwrap();
+        let mut st = with_password("hunter2");
+        st.normalize();
+        s.save_settings(&st).unwrap();
+        assert_eq!(s.load_settings().unwrap(), st);
+        assert_eq!(raw_settings(&s).contains("hunter2"), !portside_secrets::AVAILABLE);
+    }
+
+    #[test]
+    fn plaintext_credentials_are_encrypted_on_load() {
+        let s = Store::open_in_memory().unwrap();
+        let old = serde_json::to_string(&with_password("hunter2")).unwrap();
+        s.conn.lock().unwrap().execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![SETTINGS_KEY, old]).unwrap();
+        let mut want = with_password("hunter2");
+        want.normalize();
+        assert_eq!(s.load_settings().unwrap(), want);
+        assert_eq!(raw_settings(&s).contains("hunter2"), !portside_secrets::AVAILABLE);
+    }
+
+    #[test]
+    fn undecryptable_credentials_are_dropped() {
+        let s = Store::open_in_memory().unwrap();
+        // As if the database came from another Windows account.
+        let foreign = serde_json::to_string(&with_password("dpapi:00ff")).unwrap().replace("dpapi:00ff-sudo", "dpapi:abcd");
+        s.conn.lock().unwrap().execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![SETTINGS_KEY, foreign]).unwrap();
+        let loaded = s.load_settings().unwrap();
+        let portside_core::Connection::Ssh(c) = &loaded.connections[0].connection else { panic!() };
+        assert_eq!(c.auth, portside_core::SshAuth::Password { password: String::new() });
+        assert_eq!(c.sudo_password.as_deref().unwrap_or_default(), "");
     }
 
     #[test]

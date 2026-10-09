@@ -314,6 +314,9 @@ export type SshAuth =
   | { kind: "key"; privateKeyPath: string; passphrase: string | null }
   | { kind: "password"; password: string };
 
+/** Stands in for a saved password/passphrase in settings from the backend (mirrors `SAVED_SECRET`). */
+export const SAVED_SECRET = "__portside_saved__";
+
 export interface SshConnection {
   host: string;
   port: number;

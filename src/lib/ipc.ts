@@ -37,8 +37,9 @@ import type {
 
 export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (settings: Settings) => invoke<Settings>("save_settings", { settings });
-export const testConnection = (connection: Connection) =>
-  invoke<{ serverVersion: string; hostKeyFingerprint: string | null }>("test_connection", { connection });
+/** `profileId`: the saved profile being edited, so passwords left as saved can be used. */
+export const testConnection = (connection: Connection, profileId: string | null) =>
+  invoke<{ serverVersion: string; hostKeyFingerprint: string | null }>("test_connection", { connection, profileId });
 export const listKubeContexts = (kubeconfigPath: string | null) =>
   invoke<{ contexts: string[]; current: string | null }>("list_kube_contexts", { kubeconfigPath });
 export const getStatus = () => invoke<Status>("get_status");

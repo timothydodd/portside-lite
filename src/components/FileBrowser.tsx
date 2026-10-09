@@ -507,7 +507,7 @@ function AccessBanner({ session, onRecheck }: { session: FileSession; onRecheck:
   );
 }
 
-function TransferBar({ transfer }: { transfer: FileProgress }) {
+export function TransferBar({ transfer }: { transfer: FileProgress }) {
   const pct = transfer.total ? Math.min(100, (transfer.done / transfer.total) * 100) : null;
   return (
     <>

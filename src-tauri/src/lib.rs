@@ -33,7 +33,7 @@ impl EventSink for TauriSink {
         let _ = self.0.emit("cluster:status", status);
     }
     fn settings_changed(&self, settings: &Settings) {
-        let _ = self.0.emit("settings:changed", settings);
+        let _ = self.0.emit("settings:changed", settings.redacted());
         if let Some(toggle) = self.0.try_state::<TrayToggle>() {
             let _ = toggle.0.set_text(toggle_label(settings.monitoring_paused));
         }

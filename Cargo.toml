@@ -5,11 +5,12 @@ members = [
   "crates/portside-kube",
   "crates/portside-store",
   "crates/portside-monitor",
+  "crates/portside-secrets",
   "src-tauri",
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/timothydodd/portside-lite"

@@ -40,14 +40,18 @@ async fn with_store<T: Send + 'static>(
 
 // --- settings / connection -------------------------------------------------
 
+// Saved passwords and passphrases never reach the webview: settings go out
+// redacted, and what comes back is filled in from the saved profile.
+
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
-    state.monitor.settings()
+    state.monitor.settings().redacted()
 }
 
 #[tauri::command]
-pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<Settings> {
-    state.monitor.update_settings(settings).await
+pub async fn save_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult<Settings> {
+    settings.restore_secrets(&state.monitor.settings());
+    state.monitor.update_settings(settings).await.map(|s| s.redacted())
 }
 
 #[derive(Serialize)]
@@ -57,8 +61,12 @@ pub struct TestResult {
     host_key_fingerprint: Option<String>,
 }
 
+/// `profile_id` names the saved profile being edited, so secrets the form left
+/// as saved can be filled in.
 #[tauri::command]
-pub async fn test_connection(connection: Connection) -> CmdResult<TestResult> {
+pub async fn test_connection(state: State<'_, AppState>, mut connection: Connection, profile_id: Option<String>) -> CmdResult<TestResult> {
+    let saved = state.monitor.settings();
+    connection.restore_secrets(saved.connections.iter().find(|p| Some(&p.id) == profile_id.as_ref()).map(|p| &p.connection));
     let (server_version, host_key_fingerprint) = portside_kube::test_connection(&connection).await.map_err(err)?;
     Ok(TestResult { server_version, host_key_fingerprint })
 }
@@ -469,7 +477,7 @@ pub fn check_all_now(state: State<'_, AppState>) {
 /// Pause or resume all polling (also toggled from the tray menu).
 #[tauri::command]
 pub async fn set_monitoring_paused(state: State<'_, AppState>, paused: bool) -> CmdResult<Settings> {
-    state.monitor.set_paused(paused).await
+    state.monitor.set_paused(paused).await.map(|s| s.redacted())
 }
 
 // --- import ------------------------------------------------------------------

@@ -36,7 +36,9 @@ back.
 - **Export** clean, re-appliable YAML. Choose a single workload, a whole kind, or a namespace. A
   single workload can bring the objects it needs, and you pick which: its ConfigMaps, Secrets,
   ServiceAccount, PVCs, the Services that select its pods, the Ingresses that route to those
-  Services, and HPAs.
+  Services, and HPAs. PVCs are picked by default. Tick **Include the files** to also save each
+  volume's contents next to the YAML as `<claim>.data.tar.gz`, copied through the same helper pod
+  as the file browser. Stop the app first if you want a consistent copy.
 - **Copy** a workload to any saved cluster or namespace, optionally with the ConfigMaps and Secrets it
   references. The target namespace is created if needed.
 - **Import** one or many YAML files, or pasted YAML (multi-document and `kind: List` included), into

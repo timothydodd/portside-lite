@@ -67,7 +67,7 @@ jobs:
 
       # The Tauri-free crates hold the logic; their tests run everywhere.
       - name: Test
-        run: cargo test -p portside-core -p portside-store -p portside-kube -p portside-monitor
+        run: cargo test -p portside-core -p portside-store -p portside-kube -p portside-monitor -p portside-secrets
 
       # The committed notices must match the lockfiles; the full license texts ship with releases
       # (most of these licenses require their text to accompany binaries).

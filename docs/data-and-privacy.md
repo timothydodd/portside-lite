@@ -14,9 +14,13 @@ Everything is stored in `portside-lite.db` in the app data folder (`%APPDATA%\co
 
 Under **Settings → Local data** you can see the database size and prune or clear it.
 
-**Credentials.** SSH passwords, key passphrases and sudo passwords are stored **unencrypted** in that
-database. Prefer key authentication. Keep in mind that anyone who can read your user profile can
-read the file.
+**Credentials.** SSH passwords, key passphrases and sudo passwords are encrypted in that database
+with Windows DPAPI, so only your Windows account on this computer can read them. A copied
+database is no use elsewhere; after restoring one on another computer or account, type the
+passwords again. Passwords saved by older versions are encrypted the first time this version
+starts. The settings screen never receives a saved password: it shows "Saved" and only sends a new
+one when you type it. Programs running as you can still ask Windows to decrypt them, so key
+authentication remains the better choice.
 
 **Archives** are written to the archive folder (Settings → Archives; default `archives` in the app
 data folder). They contain the workload's YAML and, if you choose, its stored logs. **Secrets saved

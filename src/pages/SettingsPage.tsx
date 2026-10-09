@@ -4,7 +4,7 @@ import { Bell, CheckCircle2, FolderOpen, KeyRound, Laptop, Plus, PlugZap, Refres
 import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage, fmtAgo, fmtBytes, fmtCount } from "../lib/format";
-import type { Connection, ConnectionProfile, Settings, SshConnection, StorageStats } from "../lib/types";
+import { SAVED_SECRET, type Connection, type ConnectionProfile, type Settings, type SshConnection, type StorageStats } from "../lib/types";
 import { ModeIcon, connectionSummary } from "../components/ClusterSwitcher";
 import { PageHeader, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
@@ -222,7 +222,7 @@ function ConnectionsSection({ draft, set }: { draft: Settings; set: (p: Partial<
                 <Trash2 size={15} />
               </button>
             </div>
-            <ConnectionEditor connection={selected.connection} onChange={(connection) => update({ ...selected, connection })} />
+            <ConnectionEditor profileId={selected.id} connection={selected.connection} onChange={(connection) => update({ ...selected, connection })} />
           </div>
         ) : (
           <div className="flex flex-col items-start justify-center gap-2 rounded-md bg-muted p-5 text-sm text-content-secondary">
@@ -237,7 +237,7 @@ function ConnectionsSection({ draft, set }: { draft: Settings; set: (p: Partial<
   );
 }
 
-function ConnectionEditor({ connection, onChange }: { connection: Connection; onChange: (c: Connection) => void }) {
+function ConnectionEditor({ profileId, connection, onChange }: { profileId: string; connection: Connection; onChange: (c: Connection) => void }) {
   const mode = connection.mode;
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -246,7 +246,7 @@ function ConnectionEditor({ connection, onChange }: { connection: Connection; on
     setTesting(true);
     setResult(null);
     try {
-      const r = await ipc.testConnection(connection);
+      const r = await ipc.testConnection(connection, profileId);
       setResult({ ok: true, text: `Connected — Kubernetes ${r.serverVersion}${r.hostKeyFingerprint ? ` · host key ${r.hostKeyFingerprint}` : ""}` });
     } catch (e) {
       setResult({ ok: false, text: errorMessage(e) });
@@ -355,6 +355,31 @@ function LocalForm({ c, onChange }: { c: Extract<Connection, { mode: "local" }>;
   );
 }
 
+/**
+ * A password field. Saved values never reach the UI: they arrive as
+ * SAVED_SECRET, show as "Saved" and go back unchanged unless replaced or cleared.
+ */
+function SecretInput({ value, placeholder, onChange }: { value: string | null; placeholder: string; onChange: (v: string) => void }) {
+  const saved = value === SAVED_SECRET;
+  return (
+    <div className="flex gap-2">
+      <input
+        className="field min-w-0 flex-1"
+        type="password"
+        autoComplete="off"
+        value={saved ? "" : (value ?? "")}
+        placeholder={saved ? "Saved (type to replace)" : placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {saved && (
+        <button className="btn-ghost" title="Forget the saved value" onClick={() => onChange("")}>
+          Clear
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onChange: (c: Connection) => void }) {
   const up = (patch: Partial<SshConnection>) => onChange({ ...c, ...patch });
   return (
@@ -409,18 +434,16 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
             </div>
           </Labeled>
           <Labeled label="Passphrase" className="col-span-2">
-            <input
-              className="field w-full"
-              type="password"
-              value={c.auth.passphrase ?? ""}
+            <SecretInput
+              value={c.auth.passphrase}
               placeholder="None"
-              onChange={(e) => up({ auth: { ...(c.auth as Extract<SshConnection["auth"], { kind: "key" }>), passphrase: e.target.value || null } })}
+              onChange={(v) => up({ auth: { ...(c.auth as Extract<SshConnection["auth"], { kind: "key" }>), passphrase: v || null } })}
             />
           </Labeled>
         </>
       ) : (
-        <Labeled label="Password" className="col-span-3" hint="Stored unencrypted in the local app database. Prefer a key.">
-          <input className="field w-full" type="password" value={c.auth.password} onChange={(e) => up({ auth: { kind: "password", password: e.target.value } })} />
+        <Labeled label="Password" className="col-span-3" hint="Encrypted for your Windows account. A key is still the better choice.">
+          <SecretInput value={c.auth.password} placeholder="Required" onChange={(password) => up({ auth: { kind: "password", password } })} />
         </Labeled>
       )}
 
@@ -433,17 +456,14 @@ function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onC
             : "Needed if sudo asks for a password on this server (k3s makes its kubeconfig root-only). Leave blank for passwordless sudo."
         }
       >
-        <input
-          className="field w-full"
-          type="password"
-          autoComplete="off"
-          value={c.sudoPassword ?? ""}
+        <SecretInput
+          value={c.sudoPassword}
           placeholder={c.auth.kind === "password" ? "Same as SSH password" : "Not needed"}
-          onChange={(e) => up({ sudoPassword: e.target.value || null })}
+          onChange={(v) => up({ sudoPassword: v || null })}
         />
       </Labeled>
       <p className="col-span-3 self-end pb-1 text-[11px] text-content-muted">
-        Sent to sudo over the SSH session, never on the command line. Stored unencrypted in the local app database.
+        Sent to sudo over the SSH session, never on the command line. Encrypted for your Windows account.
       </p>
 
       <details className="col-span-6">

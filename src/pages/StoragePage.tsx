@@ -1,14 +1,28 @@
 import { useMemo, useState } from "react";
-import { FileCode2, FolderOpen, Lock, ShieldCheck, Trash2 } from "lucide-react";
+import { Download, FileCode2, FolderOpen, Lock, ShieldCheck, Trash2 } from "lucide-react";
+import * as ipc from "../lib/ipc";
 import { deleteVolumeClaim } from "../lib/actions";
-import { fmtAge } from "../lib/format";
+import { saveYamlFile } from "../lib/files";
+import { errorMessage, fmtAge } from "../lib/format";
 import type { VolumeClaimInfo } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
 import { PersistentVolumeTable, SHORT_MODES, StorageClassTable } from "../components/StorageTables";
 import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
 import { useNavStore } from "../stores/nav";
+import { toast } from "../stores/toast";
 
 type Tab = "claims" | "volumes" | "classes";
+
+/** The claim only (size, class, access modes), cleaned so it binds a fresh volume; no file data. */
+async function exportClaim(v: VolumeClaimInfo) {
+  try {
+    const y = await ipc.exportManifests("PersistentVolumeClaim", v.namespace, v.name);
+    const path = await saveYamlFile(`${v.name}.persistentvolumeclaim.yaml`, y);
+    if (path) toast.success(`Exported to ${path}`);
+  } catch (e) {
+    toast.error(errorMessage(e));
+  }
+}
 
 const SUBTITLES: Record<Tab, string> = {
   claims: "browse files on any claim; changing files or deleting one needs the apps using it scaled to 0",
@@ -147,6 +161,12 @@ function ClaimTable(p: { volumes: VolumeClaimInfo[]; namespace: string; search: 
                             label: "Edit YAML",
                             icon: <FileCode2 size={14} />,
                             onSelect: () => openEditor({ kind: "PersistentVolumeClaim", namespace: v.namespace, name: v.name }),
+                          },
+                          {
+                            label: "Export YAML",
+                            icon: <Download size={14} />,
+                            title: "Save the claim to a file (not its data)",
+                            onSelect: () => void exportClaim(v),
                           },
                           {
                             label: "Delete storage…",

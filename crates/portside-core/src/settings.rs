@@ -305,9 +305,185 @@ impl Settings {
     }
 }
 
+/// Stands in for a saved password, passphrase or sudo password in settings
+/// sent to the UI, which never sees the real value. Sent back unchanged, it
+/// means "keep what's saved" (see [`Settings::restore_secrets`]).
+pub const SAVED_SECRET: &str = "__portside_saved__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretField {
+    Password,
+    Passphrase,
+    SudoPassword,
+}
+
+impl SecretField {
+    pub const ALL: [SecretField; 3] = [SecretField::Password, SecretField::Passphrase, SecretField::SudoPassword];
+}
+
+impl Connection {
+    /// The secret slot, if this connection has one set (an unset optional
+    /// field, or a field of the other auth kind, has none).
+    pub fn secret_mut(&mut self, which: SecretField) -> Option<&mut String> {
+        let Connection::Ssh(s) = self else { return None };
+        match (which, &mut s.auth) {
+            (SecretField::Password, SshAuth::Password { password }) => Some(password),
+            (SecretField::Passphrase, SshAuth::Key { passphrase, .. }) => passphrase.as_mut(),
+            (SecretField::SudoPassword, _) => s.sudo_password.as_mut(),
+            _ => None,
+        }
+    }
+
+    fn secret(&self, which: SecretField) -> Option<&str> {
+        let Connection::Ssh(s) = self else { return None };
+        match (which, &s.auth) {
+            (SecretField::Password, SshAuth::Password { password }) => Some(password),
+            (SecretField::Passphrase, SshAuth::Key { passphrase, .. }) => passphrase.as_deref(),
+            (SecretField::SudoPassword, _) => s.sudo_password.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Replace every non-empty secret with [`SAVED_SECRET`].
+    pub fn redact(&mut self) {
+        for f in SecretField::ALL {
+            if let Some(v) = self.secret_mut(f).filter(|v| !v.is_empty()) {
+                *v = SAVED_SECRET.into();
+            }
+        }
+    }
+
+    /// Put back the secrets the UI left as [`SAVED_SECRET`], from `prev` (this
+    /// connection as saved). Without a saved value to take, the field is cleared.
+    pub fn restore_secrets(&mut self, prev: Option<&Connection>) {
+        for f in SecretField::ALL {
+            if let Some(v) = self.secret_mut(f).filter(|v| *v == SAVED_SECRET) {
+                *v = prev.and_then(|p| p.secret(f)).filter(|p| *p != SAVED_SECRET).unwrap_or_default().to_string();
+            }
+        }
+        // An empty optional secret means none.
+        if let Connection::Ssh(s) = self {
+            if let SshAuth::Key { passphrase, .. } = &mut s.auth {
+                if passphrase.as_deref() == Some("") {
+                    *passphrase = None;
+                }
+            }
+            if s.sudo_password.as_deref() == Some("") {
+                s.sudo_password = None;
+            }
+        }
+    }
+}
+
+impl Settings {
+    /// A copy safe to hand to the UI: every saved secret is [`SAVED_SECRET`].
+    pub fn redacted(&self) -> Settings {
+        let mut s = self.clone();
+        for p in &mut s.connections {
+            p.connection.redact();
+        }
+        s
+    }
+
+    /// Settings back from the UI: fill in secrets it left as [`SAVED_SECRET`]
+    /// from the same profile (by id) in `prev`.
+    pub fn restore_secrets(&mut self, prev: &Settings) {
+        for p in &mut self.connections {
+            let old = prev.connections.iter().find(|o| o.id == p.id).map(|o| &o.connection);
+            p.connection.restore_secrets(old);
+        }
+    }
+
+    /// Every set secret, for encrypting before the settings are stored.
+    pub fn secrets_mut(&mut self) -> Vec<&mut String> {
+        let mut out = Vec::new();
+        for p in &mut self.connections {
+            let Connection::Ssh(s) = &mut p.connection else { continue };
+            match &mut s.auth {
+                SshAuth::Password { password } => out.push(password),
+                SshAuth::Key { passphrase, .. } => out.extend(passphrase.as_mut()),
+            }
+            out.extend(s.sudo_password.as_mut());
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ssh(id: &str, auth: SshAuth, sudo: Option<&str>) -> ConnectionProfile {
+        let json = r#"{"mode":"ssh","host":"h","username":"u","auth":{"kind":"password","password":""}}"#;
+        let Connection::Ssh(mut c) = serde_json::from_str(json).unwrap() else { panic!() };
+        c.auth = auth;
+        c.sudo_password = sudo.map(Into::into);
+        ConnectionProfile { id: id.into(), name: id.into(), connection: Connection::Ssh(c) }
+    }
+
+    fn pw(p: &str) -> SshAuth {
+        SshAuth::Password { password: p.into() }
+    }
+
+    fn key(passphrase: Option<&str>) -> SshAuth {
+        SshAuth::Key { private_key_path: "k".into(), passphrase: passphrase.map(Into::into) }
+    }
+
+    #[test]
+    fn redacted_settings_carry_no_secrets() {
+        let s = Settings {
+            connections: vec![ssh("a", pw("login"), Some("sudo")), ssh("b", key(Some("phrase")), None), ssh("c", pw(""), Some(""))],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s.redacted()).unwrap();
+        for secret in ["login", "sudo", "phrase"] {
+            assert!(!json.contains(&format!("\"{secret}\"")), "{secret} leaked: {json}");
+        }
+        let r = s.redacted();
+        assert_eq!(r.connections[0].connection, ssh("a", pw(SAVED_SECRET), Some(SAVED_SECRET)).connection);
+        assert_eq!(r.connections[2].connection, s.connections[2].connection, "empty stays empty, so the UI shows 'none'");
+    }
+
+    #[test]
+    fn restore_keeps_saved_secrets_and_takes_new_ones() {
+        let prev = Settings {
+            connections: vec![ssh("a", pw("login"), Some("sudo")), ssh("b", key(Some("phrase")), None)],
+            ..Default::default()
+        };
+        let mut back = prev.redacted();
+        // Profile a: new sudo password typed; profile b: untouched.
+        if let Connection::Ssh(c) = &mut back.connections[0].connection {
+            c.sudo_password = Some("new-sudo".into());
+        }
+        back.restore_secrets(&prev);
+        assert_eq!(back.connections[0].connection, ssh("a", pw("login"), Some("new-sudo")).connection);
+        assert_eq!(back.connections[1].connection, prev.connections[1].connection);
+    }
+
+    #[test]
+    fn restore_never_moves_a_secret_to_another_profile_or_field() {
+        let prev = Settings { connections: vec![ssh("a", pw("login"), None)], ..Default::default() };
+        // A new profile can't borrow a's password, and switching a to key auth
+        // doesn't turn its password into a passphrase.
+        let mut back = Settings {
+            connections: vec![ssh("a", key(Some(SAVED_SECRET)), Some(SAVED_SECRET)), ssh("new", pw(SAVED_SECRET), None)],
+            ..Default::default()
+        };
+        back.restore_secrets(&prev);
+        assert_eq!(back.connections[0].connection, ssh("a", key(None), None).connection);
+        assert_eq!(back.connections[1].connection, ssh("new", pw(""), None).connection);
+    }
+
+    #[test]
+    fn secrets_mut_finds_every_set_secret() {
+        let mut s = Settings {
+            connections: vec![ssh("a", pw("login"), Some("sudo")), ssh("b", key(Some("phrase")), None), ssh("c", key(None), None), local("l", None)],
+            ..Default::default()
+        };
+        let mut found: Vec<String> = s.secrets_mut().into_iter().map(|v| v.clone()).collect();
+        found.sort();
+        assert_eq!(found, ["login", "phrase", "sudo"]);
+    }
 
     #[test]
     fn ssh_defaults_fill_in() {
