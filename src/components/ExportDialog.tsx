@@ -26,7 +26,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Export a workload together with the objects that make it run. */
+/** Export a workload (or ServiceAccount) together with the objects that make it run. */
 export default function ExportDialog() {
   const { exporting: target, closeExport } = useNavStore();
   const [related, setRelated] = useState<RelatedRef[] | null>(null);
@@ -166,7 +166,9 @@ export default function ExportDialog() {
           ) : related == null ? (
             <Spinner />
           ) : related.length === 0 ? (
-            <p className="text-xs text-content-muted">Nothing related found: no config, Services, Ingresses or autoscalers point at it.</p>
+            <p className="text-xs text-content-muted">
+              Nothing related found: no config, pull secrets, RoleBindings, Services, Ingresses or autoscalers point at it.
+            </p>
           ) : (
             <div className="flex flex-col gap-1 rounded-md bg-muted p-2">
               {related.map((r) => (

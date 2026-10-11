@@ -194,9 +194,25 @@ pub struct Settings {
     /// Image for the pod that mounts a volume for the file browser. Needs
     /// `sh`, `stat`, `head`, `tar` and `gzip` (busybox has them all).
     pub files_helper_image: String,
+    /// Copy volume backup archives from every connection to this PC.
+    pub backup_pull: bool,
+    /// When, as a schedule-picker cron in this PC's local time.
+    pub backup_pull_schedule: String,
+    /// Archives kept on this PC per volume backup; 0 = all.
+    pub backup_keep_local: u32,
+    /// Back up every connection's manifests and cluster-wide settings to this PC.
+    pub manifest_backup: bool,
+    pub manifest_backup_schedule: String,
+    /// Manifest backups kept per connection; 0 = all.
+    pub manifest_backup_keep: u32,
+    /// Where copied archives and manifest backups go; `None` = `backups` in
+    /// the app's data folder.
+    pub backup_dir: Option<String>,
 }
 
 pub const DEFAULT_FILES_HELPER_IMAGE: &str = "busybox:1.37";
+pub const DEFAULT_BACKUP_PULL_SCHEDULE: &str = "0 7 * * *";
+pub const DEFAULT_MANIFEST_BACKUP_SCHEDULE: &str = "0 3 * * *";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -221,6 +237,13 @@ impl Default for Settings {
             monitoring_paused: false,
             archive_dir: None,
             files_helper_image: DEFAULT_FILES_HELPER_IMAGE.into(),
+            backup_pull: true,
+            backup_pull_schedule: DEFAULT_BACKUP_PULL_SCHEDULE.into(),
+            backup_keep_local: 30,
+            manifest_backup: true,
+            manifest_backup_schedule: DEFAULT_MANIFEST_BACKUP_SCHEDULE.into(),
+            manifest_backup_keep: 30,
+            backup_dir: None,
         }
     }
 }
@@ -301,6 +324,13 @@ impl Settings {
         }
         if self.files_helper_image.trim().is_empty() {
             self.files_helper_image = DEFAULT_FILES_HELPER_IMAGE.into();
+        }
+        // These jobs only understand the picker's forms; anything else would never run.
+        if crate::schedule::parse(&self.backup_pull_schedule).is_none() {
+            self.backup_pull_schedule = DEFAULT_BACKUP_PULL_SCHEDULE.into();
+        }
+        if crate::schedule::parse(&self.manifest_backup_schedule).is_none() {
+            self.manifest_backup_schedule = DEFAULT_MANIFEST_BACKUP_SCHEDULE.into();
         }
     }
 }

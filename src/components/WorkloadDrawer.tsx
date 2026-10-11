@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ArchiveRestore, Download, FileCode2, FolderOpen, Play, ScrollText } from "lucide-react";
+import { Archive, ArchiveRestore, Download, FileCode2, FolderOpen, Play, RotateCcw, ScrollText } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import { restoreWorkload, runAction } from "../lib/actions";
+import { restartPod, restoreWorkload, runAction } from "../lib/actions";
 import { errorMessage, fmtAge, fmtAgo, fmtCount, fmtDateTime } from "../lib/format";
 import type { ArchiveMeta, LogSource, PodInfo, WorkloadInfo } from "../lib/types";
 import { podsOf, workloadHealth } from "../lib/workloads";
@@ -25,6 +25,7 @@ const TABS: { id: WorkloadTab; label: string }[] = [
 ];
 
 export const ARCHIVABLE = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
+export const RESTARTABLE = ["Deployment", "StatefulSet", "DaemonSet"];
 
 /**
  * One workload: live state when it's on the cluster, plus everything kept
@@ -83,6 +84,11 @@ export default function WorkloadDrawer() {
           <button className="btn-ghost" onClick={() => leave(() => openLogs({ namespace: target.namespace, workload: { kind: target.kind, name: target.name } }))} title="Search every pod's stored logs in the Log explorer">
             <ScrollText size={14} /> Log explorer
           </button>
+          {w && RESTARTABLE.includes(w.kind) && (
+            <button className="btn-ghost" onClick={() => void runAction("rolloutRestart", ref)} title="Replace every pod, one by one, following its update strategy">
+              <RotateCcw size={14} /> Restart
+            </button>
+          )}
           {w && (
             <button className="btn-ghost" onClick={() => leave(() => openEditor(ref))} title="Edit YAML">
               <FileCode2 size={14} /> Edit
@@ -250,9 +256,14 @@ function Overview({
           <div className="flex flex-wrap gap-2">
             {live.length === 0 && <span className="text-xs text-content-muted">None right now.</span>}
             {live.map((p) => (
-              <button key={p.name} className="btn-chip" onClick={() => openPod(p.namespace, p.name)}>
-                <StatusPill status={p.status} /> <span className="ml-1">{p.name}</span>
-              </button>
+              <span key={p.name} className="inline-flex items-center">
+                <button className="btn-chip" onClick={() => openPod(p.namespace, p.name)}>
+                  <StatusPill status={p.status} /> <span className="ml-1">{p.name}</span>
+                </button>
+                <button className="btn-quiet" title="Restart this pod only" aria-label={`Restart ${p.name}`} onClick={() => void restartPod(p)}>
+                  <RotateCcw size={13} />
+                </button>
+              </span>
             ))}
           </div>
         </section>

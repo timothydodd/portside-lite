@@ -6,7 +6,7 @@ use kube::Client;
 use portside_core::archive::{plan_items, ArchivePlanItem};
 use portside_core::manifest::{apply_order, ObjectRef};
 
-use crate::manifests::{api_for_kind, get_value, list_values, related, CopyResult};
+use crate::manifests::{api_for_kind, get_value, list_values, namespace_objects, related, CopyResult};
 use crate::Result;
 
 pub const WORKLOAD_KINDS: [&str; 5] = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
@@ -16,17 +16,17 @@ pub const WORKLOAD_KINDS: [&str; 5] = ["Deployment", "StatefulSet", "DaemonSet",
 pub async fn plan(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<Vec<ArchivePlanItem>> {
     let target = get_value(client, kind, Some(namespace), name).await?;
     let rel = related(client, kind, namespace, name).await?;
-    let (services, ingresses) =
-        futures::try_join!(list_values(client, "Service", namespace), list_values(client, "Ingress", namespace))?;
+    let ns = namespace_objects(client, namespace).await?;
     let mut workloads = Vec::new();
     for k in WORKLOAD_KINDS {
         workloads.extend(list_values(client, k, namespace).await?);
     }
-    Ok(plan_items(&target, rel, &workloads, &services, &ingresses))
+    Ok(plan_items(&target, rel, &workloads, &ns.services, &ns.ingresses, &ns.role_bindings))
 }
 
 /// Delete objects from one namespace, users before what they use (Ingresses
-/// and autoscalers, then the workload, then Services, config and accounts).
+/// and autoscalers, then the workload, then Services, config, accounts and
+/// their RBAC).
 /// Something already gone counts as removed. Every item gets a result.
 pub async fn remove_objects(client: &Client, namespace: &str, items: &[ObjectRef]) -> Vec<CopyResult> {
     let mut ordered: Vec<&ObjectRef> = items.iter().collect();

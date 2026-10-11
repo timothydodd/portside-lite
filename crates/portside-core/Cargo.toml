@@ -10,4 +10,7 @@ k8s-openapi = { version = "0.28.0", features = ["latest"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+base64 = "0.22"
+# Already in the tree (russh); dates only here, no clock or time zones.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 thiserror = { workspace = true }

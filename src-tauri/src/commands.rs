@@ -402,6 +402,106 @@ pub async fn save_config(
     Ok(saved)
 }
 
+/// Create a registry pull secret and optionally add it to a ServiceAccount's
+/// `imagePullSecrets`. The password goes straight to the cluster; it's never
+/// stored or sent back.
+#[tauri::command]
+pub async fn add_registry_credential(
+    state: State<'_, AppState>,
+    credential: portside_core::registry::RegistryCredentialInput,
+    service_account: Option<String>,
+    dry_run: bool,
+) -> CmdResult<Vec<String>> {
+    let cc = state.monitor.client().await?;
+    let done = portside_kube::registries::add_credential(&cc.client, &credential, service_account.as_deref(), dry_run)
+        .await
+        .map_err(err)?;
+    if !dry_run {
+        state.monitor.refresh_now();
+    }
+    Ok(done)
+}
+
+// --- volume backups ---------------------------------------------------------
+
+/// Create a backup, or change one (same name).
+#[tauri::command]
+pub async fn save_backup(state: State<'_, AppState>, spec: portside_core::backup::BackupSpec, dry_run: bool) -> CmdResult<Vec<String>> {
+    let cc = state.monitor.client().await?;
+    let done = portside_kube::backups::install(&cc.client, &spec, dry_run).await.map_err(err)?;
+    if !dry_run {
+        state.monitor.refresh_now();
+    }
+    Ok(done)
+}
+
+/// Start a backup run now; returns the Job's name.
+#[tauri::command]
+pub async fn run_backup_now(state: State<'_, AppState>, namespace: String, name: String) -> CmdResult<String> {
+    let cc = state.monitor.client().await?;
+    let job = portside_kube::backups::run_now(&cc.client, &namespace, &name).await.map_err(err)?;
+    state.monitor.refresh_now();
+    Ok(job)
+}
+
+#[tauri::command]
+pub async fn set_backup_paused(state: State<'_, AppState>, namespace: String, name: String, paused: bool) -> CmdResult<()> {
+    let cc = state.monitor.client().await?;
+    portside_kube::backups::set_paused(&cc.client, &namespace, &name, paused).await.map_err(err)?;
+    state.monitor.refresh_now();
+    Ok(())
+}
+
+/// Remove a backup's CronJob and runs; with `delete_storage`, also its claim
+/// and every archive on it (same in-use check as deleting any claim).
+#[tauri::command]
+pub async fn remove_backup(state: State<'_, AppState>, namespace: String, name: String, delete_storage: bool) -> CmdResult<()> {
+    let cc = state.monitor.client().await?;
+    portside_kube::backups::remove(&cc.client, &namespace, &name).await.map_err(err)?;
+    let result = if delete_storage {
+        state.monitor.delete_claim(&namespace, &portside_core::backup::object_name(&name)).await
+    } else {
+        Ok(())
+    };
+    state.monitor.refresh_now();
+    result.map_err(|e| format!("The backup was removed, but its storage wasn't deleted: {e}"))
+}
+
+// --- backups made on this PC --------------------------------------------------
+
+#[tauri::command]
+pub fn local_backup_status(state: State<'_, AppState>) -> portside_monitor::backups::LocalBackupStatus {
+    state.monitor.local_backup_status()
+}
+
+/// Archives on this PC for each volume backup of the active connection.
+#[tauri::command]
+pub async fn local_backup_archives(state: State<'_, AppState>) -> CmdResult<Vec<portside_monitor::backups::LocalArchives>> {
+    Ok(state.monitor.local_archives().await)
+}
+
+/// Run these for every connection now, whatever the schedule.
+#[tauri::command]
+pub fn run_local_backups(state: State<'_, AppState>, jobs: Vec<portside_monitor::backups::BackupJob>) {
+    state.monitor.run_local_backups_now(&jobs);
+}
+
+/// Open the backup folder, or a connection's folder in it.
+#[tauri::command]
+pub fn open_backup_folder(state: State<'_, AppState>, profile_id: Option<String>) -> CmdResult<()> {
+    let root = state.monitor.backup_root();
+    let path = match profile_id {
+        Some(id) => {
+            let status = state.monitor.local_backup_status();
+            let p = status.profiles.iter().find(|p| p.profile_id == id).ok_or("That connection no longer exists.")?;
+            root.join(&p.folder)
+        }
+        None => root,
+    };
+    std::fs::create_dir_all(&path).map_err(|e| format!("Couldn't create {}: {e}", path.display()))?;
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
+}
+
 /// Copy a workload (plus chosen related objects) from the active cluster
 /// to any saved connection, into `target_namespace`.
 #[tauri::command]

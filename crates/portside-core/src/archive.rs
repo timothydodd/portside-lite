@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::manifest::{ingress_backend_services, references, selector_matches, ObjectRef, RelatedRef};
+use crate::manifest::{binding_accounts, ingress_backend_services, references, selector_matches, service_account_name, ObjectRef, RelatedRef};
 
 /// Bumped when the on-disk layout of an archive changes.
 pub const ARCHIVE_FORMAT: u32 = 1;
@@ -63,7 +63,7 @@ pub struct ArchivePlanItem {
 
 /// One path segment safe on every filesystem (k8s names already are; the
 /// cluster id has `:` and `@`).
-fn safe_segment(s: &str) -> String {
+pub fn safe_segment(s: &str) -> String {
     let out: String = s
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
@@ -157,15 +157,18 @@ fn kind_name(v: &Value) -> (String, String) {
 /// need it. `workloads` are the namespace's Deployments, StatefulSets,
 /// DaemonSets, Jobs and CronJobs (the target among them is skipped, as are
 /// objects with an owner, e.g. a CronJob's Jobs, whose owner speaks for
-/// them). `services` and `ingresses` are the namespace's objects of those
-/// kinds. An Ingress counts as shared when it also routes to Services that
-/// aren't the target's.
+/// them). `services`, `ingresses` and `role_bindings` are the namespace's
+/// objects of those kinds. An Ingress counts as shared when it also routes to
+/// Services that aren't the target's. What came through the ServiceAccount
+/// (`via`) is shared with every workload running as it; a RoleBinding also
+/// with whoever else it binds, a Role with bindings outside the archive.
 pub fn plan_items(
     target: &Value,
     related: Vec<RelatedRef>,
     workloads: &[Value],
     services: &[Value],
     ingresses: &[Value],
+    role_bindings: &[Value],
 ) -> Vec<ArchivePlanItem> {
     let target_id = kind_name(target);
     let others: Vec<&Value> = workloads
@@ -182,6 +185,11 @@ pub fn plan_items(
     };
     let our_services: Vec<String> = related.iter().filter(|r| r.kind == "Service").map(|r| r.name.clone()).collect();
     let ours: Vec<&str> = our_services.iter().map(String::as_str).collect();
+    let our_bindings: Vec<String> = related.iter().filter(|r| r.kind == "RoleBinding").map(|r| r.name.clone()).collect();
+    let namespace = target.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or_default();
+    let running_as = |account: &str| -> Vec<String> {
+        others.iter().filter(|w| service_account_name(w).as_deref() == Some(account)).map(|w| label(w)).collect()
+    };
 
     related
         .into_iter()
@@ -195,9 +203,47 @@ pub fn plan_items(
                 }
                 "Ingress" => named(ingresses, &r.name).map(|i| ingress_foreign_backends(&i, &ours)).unwrap_or_default(),
                 "HorizontalPodAutoscaler" => Vec::new(),
+                "RoleBinding" => {
+                    let mine = r.via.as_deref().and_then(|v| v.strip_prefix("ServiceAccount/"));
+                    let mut users = Vec::new();
+                    if let Some(rb) = named(role_bindings, &r.name) {
+                        for (ns, account) in binding_accounts(&rb) {
+                            match ns.as_deref().filter(|n| *n != namespace) {
+                                Some(other_ns) => users.push(format!("ServiceAccount {other_ns}/{account}")),
+                                None if Some(account.as_str()) == mine => users.extend(running_as(&account)),
+                                None => users.push(format!("ServiceAccount/{account}")),
+                            }
+                        }
+                        for s in rb.get("subjects").and_then(Value::as_array).into_iter().flatten() {
+                            let kind = s.get("kind").and_then(Value::as_str).unwrap_or_default();
+                            if kind != "ServiceAccount" {
+                                users.push(format!("{kind}/{}", s.get("name").and_then(Value::as_str).unwrap_or_default()));
+                            }
+                        }
+                    }
+                    users
+                }
+                "Role" => {
+                    let mut users: Vec<String> = role_bindings
+                        .iter()
+                        .filter(|rb| rb.pointer("/roleRef/kind").and_then(Value::as_str) == Some("Role"))
+                        .filter(|rb| rb.pointer("/roleRef/name").and_then(Value::as_str) == Some(r.name.as_str()))
+                        .filter_map(|rb| rb.pointer("/metadata/name").and_then(Value::as_str))
+                        .filter(|n| !our_bindings.iter().any(|o| o == n))
+                        .map(|n| format!("RoleBinding/{n}"))
+                        .collect();
+                    if let Some(account) = r.via.as_deref().and_then(|v| v.strip_prefix("ServiceAccount/")) {
+                        users.extend(running_as(account));
+                    }
+                    users
+                }
                 _ => {
                     let me = ObjectRef { kind: r.kind.clone(), name: r.name.clone() };
-                    others.iter().filter(|w| references(w).contains(&me)).map(|w| label(w)).collect()
+                    let mut users: Vec<String> = others.iter().filter(|w| references(w).contains(&me)).map(|w| label(w)).collect();
+                    if let Some(account) = r.via.as_deref().and_then(|v| v.strip_prefix("ServiceAccount/")) {
+                        users.extend(running_as(account));
+                    }
+                    users
                 }
             };
             used_by.sort();
@@ -262,7 +308,7 @@ mod tests {
     }
 
     fn rel(kind: &str, name: &str) -> RelatedRef {
-        RelatedRef { kind: kind.into(), name: name.into(), reason: String::new(), exists: true, sensitive: false, default_selected: true }
+        RelatedRef { kind: kind.into(), name: name.into(), exists: true, default_selected: true, ..Default::default() }
     }
 
     fn workload(kind: &str, name: &str, app: &str, config: &str) -> Value {
@@ -301,7 +347,7 @@ mod tests {
             rel("Ingress", "site"),
             rel("HorizontalPodAutoscaler", "web"),
         ];
-        let plan = plan_items(&target, related, &workloads, &services, &ingresses);
+        let plan = plan_items(&target, related, &workloads, &services, &ingresses, &[]);
         let used: Vec<(String, Vec<String>)> = plan.into_iter().map(|p| (format!("{}/{}", p.related.kind, p.related.name), p.used_by)).collect();
         assert_eq!(
             used,
@@ -312,6 +358,34 @@ mod tests {
                 ("Ingress/web-ing".into(), vec![]),
                 ("Ingress/site".into(), vec!["Service/blog".to_string()]),
                 ("HorizontalPodAutoscaler/web".into(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn account_grants_are_shared_with_whoever_runs_as_it() {
+        let as_account = |kind: &str, name: &str, sa: &str| {
+            json!({ "kind": kind, "metadata": { "name": name, "namespace": "apps" },
+                    "spec": { "template": { "spec": { "serviceAccountName": sa, "containers": [{ "name": "c" }] } } } })
+        };
+        let target = as_account("Deployment", "web", "web-sa");
+        let workloads = vec![target.clone(), as_account("Deployment", "worker", "web-sa"), as_account("Deployment", "solo", "solo-sa")];
+        let role_bindings = vec![
+            json!({ "metadata": { "name": "web-rb" }, "roleRef": { "kind": "Role", "name": "reader" },
+                    "subjects": [{ "kind": "ServiceAccount", "name": "web-sa" }, { "kind": "User", "name": "bob" }] }),
+            json!({ "metadata": { "name": "solo-rb" }, "roleRef": { "kind": "Role", "name": "reader" },
+                    "subjects": [{ "kind": "ServiceAccount", "name": "solo-sa" }] }),
+        ];
+        let via = |kind: &str, name: &str| RelatedRef { via: Some("ServiceAccount/web-sa".into()), ..rel(kind, name) };
+        let related = vec![via("Secret", "quay"), via("RoleBinding", "web-rb"), via("Role", "reader")];
+        let plan = plan_items(&target, related, &workloads, &[], &[], &role_bindings);
+        let used: Vec<(String, Vec<String>)> = plan.into_iter().map(|p| (format!("{}/{}", p.related.kind, p.related.name), p.used_by)).collect();
+        assert_eq!(
+            used,
+            vec![
+                ("Secret/quay".into(), vec!["Deployment/worker".to_string()]),
+                ("RoleBinding/web-rb".into(), vec!["Deployment/worker".to_string(), "User/bob".to_string()]),
+                ("Role/reader".into(), vec!["Deployment/worker".to_string(), "RoleBinding/solo-rb".to_string()]),
             ]
         );
     }

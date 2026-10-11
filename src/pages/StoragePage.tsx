@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { Download, FileCode2, FolderOpen, Lock, ShieldCheck, Trash2 } from "lucide-react";
+import { DatabaseBackup, Download, FileCode2, FolderOpen, Lock, ShieldCheck, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { deleteVolumeClaim } from "../lib/actions";
 import { saveYamlFile } from "../lib/files";
 import { errorMessage, fmtAge } from "../lib/format";
-import type { VolumeClaimInfo } from "../lib/types";
+import { backupForClaim, isBackupClaim } from "../lib/backups";
+import type { BackupInfo, VolumeClaimInfo } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
 import { PersistentVolumeTable, SHORT_MODES, StorageClassTable } from "../components/StorageTables";
 import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
@@ -56,7 +57,7 @@ export default function StoragePage() {
               ))}
             </div>
             {tab === "claims" ? (
-              <ClaimTable volumes={s.volumes} namespace={namespace} search={search} />
+              <ClaimTable volumes={s.volumes} backups={s.backups} namespace={namespace} search={search} />
             ) : tab === "volumes" ? (
               <PersistentVolumeTable volumes={s.persistentVolumes} namespace={namespace} search={search} />
             ) : (
@@ -69,8 +70,8 @@ export default function StoragePage() {
   );
 }
 
-function ClaimTable(p: { volumes: VolumeClaimInfo[]; namespace: string; search: string }) {
-  const { openFiles, openWorkload, openPod, openEditor } = useNavStore();
+function ClaimTable(p: { volumes: VolumeClaimInfo[]; backups: BackupInfo[]; namespace: string; search: string }) {
+  const { openFiles, openWorkload, openPod, openEditor, openBackupSetup } = useNavStore();
   const rows = useMemo(() => {
     const q = p.search.toLowerCase();
     return p.volumes
@@ -167,6 +168,12 @@ function ClaimTable(p: { volumes: VolumeClaimInfo[]; namespace: string; search: 
                             icon: <Download size={14} />,
                             title: "Save the claim to a file (not its data)",
                             onSelect: () => void exportClaim(v),
+                          },
+                          !isBackupClaim(v.name) && {
+                            label: backupForClaim(p.backups, v) ? "Change backup…" : "Back up on a schedule…",
+                            icon: <DatabaseBackup size={14} />,
+                            title: "Copy it to a backup volume on a schedule, keeping the newest copies",
+                            onSelect: () => openBackupSetup({ claim: { namespace: v.namespace, name: v.name } }),
                           },
                           {
                             label: "Delete storage…",

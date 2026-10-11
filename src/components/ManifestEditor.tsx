@@ -71,7 +71,8 @@ export default function ManifestEditor() {
     }
   };
 
-  const isWorkload = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].includes(target.kind);
+  // Kinds with related objects to pick (and that Copy handles).
+  const isWorkload = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "ServiceAccount"].includes(target.kind);
 
   const exportClean = async () => {
     if (isWorkload) {

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ArchiveMeta, LogLevel, ManifestTarget, WorkloadRef } from "../lib/types";
+import type { ArchiveMeta, BackupSpec, LogLevel, ManifestTarget, WorkloadRef } from "../lib/types";
 
 export type Page =
   | "overview"
@@ -9,6 +9,7 @@ export type Page =
   | "services"
   | "config"
   | "storage"
+  | "backups"
   | "nodes"
   | "events"
   | "logs"
@@ -53,6 +54,8 @@ interface NavState {
   forward: { namespace: string; service: string } | null;
   /** Volume file browser drawer for a PersistentVolumeClaim. */
   files: { namespace: string; claim: string } | null;
+  /** Volume backup dialog: set one up for a claim, or change an existing one. */
+  backupSetup: { claim: { namespace: string; name: string } } | { spec: BackupSpec } | null;
   /** Asked before leaving the current page (unsaved settings); true = fine to go. */
   leaveGuard: (() => Promise<boolean>) | null;
   setLeaveGuard: (g: (() => Promise<boolean>) | null) => void;
@@ -82,6 +85,8 @@ interface NavState {
   closeForward: () => void;
   openFiles: (namespace: string, claim: string) => void;
   closeFiles: () => void;
+  openBackupSetup: (setup: { claim: { namespace: string; name: string } } | { spec: BackupSpec }) => void;
+  closeBackupSetup: () => void;
 }
 
 export const useNavStore = create<NavState>((set, get) => ({
@@ -98,6 +103,7 @@ export const useNavStore = create<NavState>((set, get) => ({
   config: null,
   forward: null,
   files: null,
+  backupSetup: null,
   leaveGuard: null,
   setLeaveGuard: (leaveGuard) => set({ leaveGuard }),
   go: (page) => {
@@ -134,4 +140,6 @@ export const useNavStore = create<NavState>((set, get) => ({
   closeForward: () => set({ forward: null }),
   openFiles: (namespace, claim) => set({ files: { namespace, claim }, pod: null, node: null, workload: null }),
   closeFiles: () => set({ files: null }),
+  openBackupSetup: (backupSetup) => set({ backupSetup }),
+  closeBackupSetup: () => set({ backupSetup: null }),
 }));

@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BackupJob,
+  BackupSpec,
+  LocalArchives,
+  LocalBackupStatus,
   ClusterSnapshot,
   ConfigData,
   Connection,
@@ -23,6 +27,7 @@ import type {
   ManifestDoc,
   ObjectRef,
   PodLogTotals,
+  RegistryCredentialInput,
   RelatedRef,
   Sample,
   Settings,
@@ -113,6 +118,18 @@ export const saveConfig = (
   text: Record<string, string>,
   keepBinary: string[],
 ) => invoke<ConfigData>("save_config", { kind, namespace, name, resourceVersion, text, keepBinary });
+export const addRegistryCredential = (credential: RegistryCredentialInput, serviceAccount: string | null, dryRun: boolean) =>
+  invoke<string[]>("add_registry_credential", { credential, serviceAccount, dryRun });
+export const saveBackup = (spec: BackupSpec, dryRun: boolean) => invoke<string[]>("save_backup", { spec, dryRun });
+export const runBackupNow = (namespace: string, name: string) => invoke<string>("run_backup_now", { namespace, name });
+export const setBackupPaused = (namespace: string, name: string, paused: boolean) =>
+  invoke<void>("set_backup_paused", { namespace, name, paused });
+export const removeBackup = (namespace: string, name: string, deleteStorage: boolean) =>
+  invoke<void>("remove_backup", { namespace, name, deleteStorage });
+export const localBackupStatus = () => invoke<LocalBackupStatus>("local_backup_status");
+export const localBackupArchives = () => invoke<LocalArchives[]>("local_backup_archives");
+export const runLocalBackups = (jobs: BackupJob[]) => invoke<void>("run_local_backups", { jobs });
+export const openBackupFolder = (profileId: string | null) => invoke<void>("open_backup_folder", { profileId });
 export const copyToCluster = (
   kind: string,
   namespace: string,

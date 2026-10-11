@@ -491,15 +491,27 @@ fn detect_workloads(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
             }
             "Job" => {
                 if let Some(msg) = w.condition_message.as_ref().filter(|_| !superseded(w, snap)) {
-                    out.push(workload_issue(
-                        "job-failed",
-                        Severity::Warning,
-                        w,
-                        format!("Job failed: {}", w.name),
-                        format!("{msg} ({} failed pods).", w.failed),
-                        "Check the failed pods' logs. Delete the Job once handled so it stops showing.",
-                        vec![],
-                    ));
+                    let backup = w.name.rsplit_once('-').and_then(|(cron, _)| crate::backup::backup_name(cron));
+                    out.push(match backup {
+                        Some(b) => workload_issue(
+                            "job-failed",
+                            Severity::Warning,
+                            w,
+                            format!("Volume backup failed: {b}"),
+                            format!("{msg} ({} failed pods).", w.failed),
+                            "Open the failed run's logs on the Backups page: the reason is at the end. The problem clears after the next successful run.",
+                            vec![ActionKind::RunBackup],
+                        ),
+                        None => workload_issue(
+                            "job-failed",
+                            Severity::Warning,
+                            w,
+                            format!("Job failed: {}", w.name),
+                            format!("{msg} ({} failed pods).", w.failed),
+                            "Check the failed pods' logs. Delete the Job once handled so it stops showing.",
+                            vec![],
+                        ),
+                    });
                 }
             }
             _ => {}
@@ -643,6 +655,76 @@ fn detect_workloads(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
     }
 }
 
+/// A backup that hasn't succeeded within its max age (a paused one is left
+/// alone: pausing is a choice). Failed runs are `job-failed`.
+fn detect_backups(snap: &ClusterSnapshot, now: i64, out: &mut Vec<Issue>) {
+    for b in &snap.backups {
+        let Some(max_age) = b.spec.as_ref().map(|s| s.max_age_hours).filter(|h| *h > 0) else { continue };
+        if b.suspended {
+            continue;
+        }
+        let Some(since) = b.last_successful_ms.or(b.created_ms) else { continue };
+        if now - since <= max_age as i64 * 3_600_000 {
+            continue;
+        }
+        let detail = match b.last_successful_ms {
+            Some(_) => format!("No successful backup in over {max_age} h. The last one was {}.", fmt_hours(now - since)),
+            None => format!("It was set up {} and hasn't succeeded yet.", fmt_hours(now - since)),
+        };
+        out.push(Issue {
+            key: format!("backup-stale:CronJob/{}/{}", b.namespace, b.cron_job),
+            severity: Severity::Warning,
+            category: "workload".into(),
+            rule: "backup-stale".into(),
+            kind: "CronJob".into(),
+            namespace: Some(b.namespace.clone()),
+            name: b.cron_job.clone(),
+            title: format!("Volume backup is overdue: {}", b.name),
+            detail,
+            hint: Some(match &b.last_failure {
+                Some(f) => format!("The last run failed: {f}. Open its logs on the Backups page, fix the cause, then run it now."),
+                None => "Check the schedule, and that the cluster was up when it was due. Run it now to make a fresh backup.".into(),
+            }),
+            since_ms: Some(since),
+            actions: vec![ActionKind::RunBackup],
+            first_seen_ms: None,
+        });
+    }
+}
+
+/// A workload a backup run scaled to 0 that's still at 0 with no run going:
+/// the run was killed before it could start it again.
+fn detect_left_offline(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for w in &snap.workloads {
+        let Some(backup) = &w.backup_offline else { continue };
+        let running = snap.backups.iter().any(|b| b.namespace == w.namespace && &b.name == backup && b.running);
+        if running {
+            continue;
+        }
+        out.push(workload_issue(
+            "backup-left-offline",
+            Severity::Critical,
+            w,
+            format!("Left stopped by a backup: {}", w.name),
+            format!(
+                "Backup {backup} scaled it to 0 for a copy and didn't start it again{}.",
+                w.disabled_replicas.map(|n| format!(" (it was at {n} replicas)")).unwrap_or_default()
+            ),
+            "Scale it back up (Restore in the scale dialog), then check the backup's last run on the Backups page.",
+            vec![ActionKind::Scale],
+        ));
+    }
+}
+
+fn fmt_hours(ms: i64) -> String {
+    let h = ms / 3_600_000;
+    if h >= 48 {
+        format!("{} days ago", h / 24)
+    } else {
+        format!("{h} h ago")
+    }
+}
+
 /// Ingress rules that send traffic to a Service that doesn't exist.
 fn detect_ingresses(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
     for ing in &snap.ingresses {
@@ -703,6 +785,33 @@ fn detect_services(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
             title: format!("No endpoints: Service {}", s.name),
             detail,
             hint: Some(hint.into()),
+            since_ms: None,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+}
+
+/// A ServiceAccount that hands its pods a pull secret that doesn't exist:
+/// pulls from a private registry fail with ImagePullBackOff.
+fn detect_accounts(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for sa in snap.service_accounts.iter().filter(|sa| !sa.missing_pull_secrets.is_empty() && !sa.used_by.is_empty()) {
+        out.push(Issue {
+            key: format!("missing-pull-secret:ServiceAccount/{}/{}", sa.namespace, sa.name),
+            severity: Severity::Warning,
+            category: "config".into(),
+            rule: "missing-pull-secret".into(),
+            kind: "ServiceAccount".into(),
+            namespace: Some(sa.namespace.clone()),
+            name: sa.name.clone(),
+            title: format!("Missing pull secret: ServiceAccount {}", sa.name),
+            detail: format!(
+                "Lists imagePullSecrets {} that don't exist in {}; {} run as it.",
+                sa.missing_pull_secrets.join(", "),
+                sa.namespace,
+                sa.used_by.join(", ")
+            ),
+            hint: Some("Add the registry credential (Config → Registries → Add credential) or remove the entry from the account.".into()),
             since_ms: None,
             actions: vec![],
             first_seen_ms: None,
@@ -795,6 +904,9 @@ pub fn detect(snap: &ClusterSnapshot, settings: &Settings, now_ms: i64) -> Vec<I
     detect_workloads(snap, now_ms, &mut out);
     detect_services(snap, &mut out);
     detect_ingresses(snap, &mut out);
+    detect_accounts(snap, &mut out);
+    detect_backups(snap, now_ms, &mut out);
+    detect_left_offline(snap, &mut out);
     detect_events(snap, now_ms, &mut out);
     sort_dedupe(&mut out);
     out
@@ -1019,6 +1131,52 @@ mod tests {
         assert_eq!(rules(vec![cron.clone(), failed.clone()]), ["job-failed"]);
         assert!(rules(vec![cron, failed.clone(), later_ok.clone()]).is_empty());
         assert_eq!(rules(vec![failed, later_ok]), ["job-failed"], "a standalone Job stays until it's deleted");
+    }
+
+    #[test]
+    fn backups_go_stale_after_their_max_age() {
+        let spec = crate::backup::sample_spec();
+        let hour = 3_600_000;
+        let backup = |last_ok: Option<i64>, created: i64| BackupInfo {
+            namespace: "shop".into(),
+            name: "uploads".into(),
+            cron_job: "portside-backup-uploads".into(),
+            spec: Some(spec.clone()),
+            last_successful_ms: last_ok,
+            created_ms: Some(created),
+            ..Default::default()
+        };
+        let rules = |b: BackupInfo| -> Vec<String> {
+            detect(&ClusterSnapshot { backups: vec![b], ..Default::default() }, &Settings::default(), NOW).into_iter().map(|i| i.rule).collect()
+        };
+        assert!(rules(backup(Some(NOW - 20 * hour), 0)).is_empty(), "within its max age");
+        assert_eq!(rules(backup(Some(NOW - 40 * hour), 0)), ["backup-stale"]);
+        assert!(rules(backup(None, NOW - 2 * hour)).is_empty(), "new, not due yet");
+        assert_eq!(rules(backup(None, NOW - 40 * hour)), ["backup-stale"], "never succeeded");
+        assert!(rules(BackupInfo { suspended: true, ..backup(Some(0), 0) }).is_empty(), "paused on purpose");
+        let mut no_limit = backup(Some(0), 0);
+        no_limit.spec.as_mut().unwrap().max_age_hours = 0;
+        assert!(rules(no_limit).is_empty());
+    }
+
+    #[test]
+    fn failed_backup_runs_are_named_and_offer_a_rerun() {
+        let failed = WorkloadInfo { condition_message: Some("BackoffLimitExceeded".into()), ..workload("Job", "portside-backup-uploads-29001234", 0, 1) };
+        let issues = detect(&ClusterSnapshot { workloads: vec![failed], ..Default::default() }, &Settings::default(), NOW);
+        assert_eq!(issues[0].title, "Volume backup failed: uploads");
+        assert_eq!(issues[0].actions, [ActionKind::RunBackup]);
+    }
+
+    #[test]
+    fn workloads_left_stopped_by_a_backup() {
+        let stopped = WorkloadInfo { backup_offline: Some("uploads".into()), disabled_replicas: Some(2), ..workload("Deployment", "web", 0, 0) };
+        let backup = |running| BackupInfo { namespace: "default".into(), name: "uploads".into(), running, ..Default::default() };
+        let rules = |b: BackupInfo| -> Vec<String> {
+            let snap = ClusterSnapshot { workloads: vec![stopped.clone()], backups: vec![b], ..Default::default() };
+            detect(&snap, &Settings::default(), NOW).into_iter().map(|i| i.rule).collect()
+        };
+        assert!(rules(backup(true)).is_empty(), "stopped on purpose while the copy runs");
+        assert_eq!(rules(backup(false)), ["backup-left-offline"]);
     }
 
     #[test]

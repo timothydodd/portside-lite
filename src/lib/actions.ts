@@ -4,7 +4,8 @@ import { confirmDestructive } from "./dialog";
 import { errorMessage } from "./format";
 import { toast } from "../stores/toast";
 import { useNavStore } from "../stores/nav";
-import type { ActionKind } from "./types";
+import { backupNameOf } from "./backups";
+import type { ActionKind, PodInfo } from "./types";
 
 export interface ActionTarget {
   kind: string;
@@ -24,6 +25,7 @@ export const ACTION_LABELS: Record<ActionKind, string> = {
   scale: "Scale",
   cordon: "Cordon",
   uncordon: "Uncordon",
+  runBackup: "Run backup now",
 };
 
 interface ScaleDialogState {
@@ -79,6 +81,27 @@ export async function runAction(action: ActionKind, t: ActionTarget): Promise<vo
     case "uncordon":
       await attempt(`Uncordoned ${t.name}`, () => ipc.setCordon(t.name, false));
       return;
+    case "runBackup": {
+      const name = backupNameOf(t.kind, t.name);
+      await attempt(`Backup ${name} started`, async () => {
+        await ipc.runBackupNow(ns, name);
+      });
+      return;
+    }
+  }
+}
+
+/**
+ * Restart one pod: delete it so its controller starts a fresh one. A pod
+ * with no controller isn't recreated, so the confirm says so.
+ */
+export async function restartPod(p: Pick<PodInfo, "namespace" | "name" | "ownerKind" | "ownerName">) {
+  const owner = p.ownerKind && p.ownerName ? `${p.ownerKind} ${p.ownerName}` : null;
+  const detail = owner
+    ? `It's deleted and ${owner} starts a replacement${p.ownerKind === "StatefulSet" ? " with the same name" : ""}. Other pods keep running.`
+    : "This pod has no controller, so deleting it removes it for good. Nothing will start a replacement.";
+  if (await confirmDestructive(`Restart pod ${p.namespace}/${p.name}?\n\n${detail}`, owner ? "Restart pod" : "Delete pod")) {
+    await attempt(owner ? `Restarting ${p.name}` : `Deleted ${p.name}`, () => ipc.deletePod(p.namespace, p.name));
   }
 }
 

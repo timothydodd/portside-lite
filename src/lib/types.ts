@@ -10,7 +10,8 @@ export type ActionKind =
   | "rolloutRestart"
   | "scale"
   | "cordon"
-  | "uncordon";
+  | "uncordon"
+  | "runBackup";
 
 export interface ConditionInfo {
   type: string;
@@ -97,10 +98,13 @@ export interface WorkloadInfo {
   paused: boolean;
   /** Scaled to 0 through Portside; the replica count Restore brings back. */
   disabledReplicas: number | null;
+  /** Scaled to 0 by this backup for a copy; still set with no run going = left stopped. */
+  backupOffline: string | null;
   conditionMessage: string | null;
   createdMs: number | null;
   schedule: string | null;
   lastScheduleMs: number | null;
+  lastSuccessfulMs: number | null;
   /** PersistentVolumeClaims its pods mount. */
   claims: string[];
 }
@@ -229,6 +233,53 @@ export interface ConfigInfo {
   createdMs: number | null;
 }
 
+export interface ServiceAccountInfo {
+  namespace: string;
+  name: string;
+  /** Handed to every pod running as this account. */
+  imagePullSecrets: string[];
+  /** Of those, the ones that don't exist in the namespace. */
+  missingPullSecrets: string[];
+  /** null = the default (token mounted). */
+  automountToken: boolean | null;
+  /** "Role/x (RoleBinding y)", "ClusterRole/x (ClusterRoleBinding y, all namespaces)". */
+  roles: string[];
+  /** Workloads whose pods run as it, "Kind/name". */
+  usedBy: string[];
+  createdMs: number | null;
+}
+
+/** A pull secret listing a registry host. Never the values. */
+export interface RegistryCredential {
+  namespace: string;
+  secret: string;
+  username: string | null;
+  /** ServiceAccounts that hand it to their pods. */
+  serviceAccounts: string[];
+}
+
+export interface RegistryInfo {
+  host: string;
+  /** Distinct images in use from it, without the host. */
+  images: string[];
+  /** "namespace/Kind/name". */
+  usedBy: string[];
+  credentials: RegistryCredential[];
+  /** Workloads pulling from it with no pull secret for it, "namespace/Kind/name". */
+  withoutCredentials: string[];
+  /** "namespace/pod (container): image" stuck on an image pull error. */
+  pullErrors: string[];
+}
+
+export interface RegistryCredentialInput {
+  namespace: string;
+  name: string;
+  server: string;
+  username: string;
+  password: string;
+  email: string | null;
+}
+
 export interface EventInfo {
   namespace: string;
   objectKind: string;
@@ -245,7 +296,7 @@ export interface EventInfo {
 export interface Issue {
   key: string;
   severity: Severity;
-  category: "pod" | "node" | "workload" | "network" | "storage" | "event" | "logs";
+  category: "pod" | "node" | "workload" | "network" | "storage" | "config" | "event" | "logs";
   rule: string;
   kind: string;
   namespace: string | null;
@@ -290,9 +341,93 @@ export interface ClusterSnapshot {
   storageClasses: StorageClassInfo[];
   /** ConfigMaps and Secrets: key names and sizes only. */
   configs: ConfigInfo[];
+  serviceAccounts: ServiceAccountInfo[];
+  /** Hosts images are pulled from, plus hosts a pull secret has credentials for. */
+  registries: RegistryInfo[];
+  /** Volume backups Portside set up. */
+  backups: BackupInfo[];
   events: EventInfo[];
   issues: Issue[];
   namespaces: string[];
+}
+
+/** portside-core/backup.rs. Every object a backup creates is `portside-backup-<name>`. */
+export interface BackupSpec {
+  namespace: string;
+  name: string;
+  /** The PersistentVolumeClaim being backed up. */
+  claim: string;
+  /** Cron expression, in `timeZone`. */
+  schedule: string;
+  /** IANA name; null = the cluster's (UTC on k3s). */
+  timeZone: string | null;
+  /** Archives kept on the cluster. */
+  keep: number;
+  /** Raise a problem after this long without a successful run; 0 = never. */
+  maxAgeHours: number;
+  /** Only used when the backup claim is created. */
+  claimSize: string;
+  storageClass: string | null;
+  /** Scale `workloads` to 0 for the copy and back up afterwards. */
+  offline: boolean;
+  /** "Deployment/web": stopped during the copy when `offline`. */
+  workloads: string[];
+  image: string;
+}
+
+export interface BackupInfo {
+  namespace: string;
+  name: string;
+  cronJob: string;
+  /** null when the CronJob's settings annotation is missing (edited by hand). */
+  spec: BackupSpec | null;
+  schedule: string;
+  timeZone: string | null;
+  suspended: boolean;
+  running: boolean;
+  lastScheduleMs: number | null;
+  lastSuccessfulMs: number | null;
+  /** The newest finished run failed. */
+  lastFailure: string | null;
+  lastFailureMs: number | null;
+  claimPhase: string | null;
+  claimCapacity: string | null;
+  createdMs: number | null;
+}
+
+/** portside-monitor/backups.rs: backups this PC makes. */
+export type BackupJob = "pull" | "manifests";
+
+export interface JobRecord {
+  lastAttemptMs: number | null;
+  lastSuccessMs: number | null;
+  error: string | null;
+  summary: string | null;
+}
+
+export interface ProfileBackupStatus {
+  profileId: string;
+  name: string;
+  /** Its folder under the backup folder. */
+  folder: string;
+  pull: JobRecord;
+  manifests: JobRecord;
+}
+
+export interface LocalBackupStatus {
+  folder: string;
+  /** What it's doing right now. */
+  activity: string | null;
+  profiles: ProfileBackupStatus[];
+}
+
+/** Archives on this PC for one volume backup of the active connection. */
+export interface LocalArchives {
+  namespace: string;
+  name: string;
+  count: number;
+  bytes: number;
+  newestMs: number | null;
 }
 
 export interface Status {
@@ -364,6 +499,19 @@ export interface Settings {
   archiveDir: string | null;
   /** Image for the pod that mounts a volume for the file browser. */
   filesHelperImage: string;
+  /** Copy volume backup archives from every connection to this PC. */
+  backupPull: boolean;
+  /** Schedule-picker cron, in this PC's local time. */
+  backupPullSchedule: string;
+  /** Archives kept on this PC per volume backup; 0 = all. */
+  backupKeepLocal: number;
+  /** Back up every connection's manifests and cluster-wide settings to this PC. */
+  manifestBackup: boolean;
+  manifestBackupSchedule: string;
+  /** Manifest backups kept per connection; 0 = all. */
+  manifestBackupKeep: number;
+  /** null = `backups` in the app data folder. */
+  backupDir: string | null;
 }
 
 // --- store ---------------------------------------------------------------
@@ -489,6 +637,8 @@ export interface RelatedRef extends ObjectRef {
   /** Holds credentials; never pre-selected. */
   sensitive: boolean;
   defaultSelected: boolean;
+  /** Came through the ServiceAccount its pods run as, "ServiceAccount/x". */
+  via: string | null;
 }
 
 export interface ConfigEntry {

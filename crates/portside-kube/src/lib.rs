@@ -5,12 +5,14 @@
 
 pub mod actions;
 pub mod archive;
+pub mod backups;
 pub mod config;
 pub mod files;
 pub mod collect;
 pub mod logs;
 pub mod manifests;
 pub mod portforward;
+pub mod registries;
 mod ssh;
 
 use kube::config::{KubeConfigOptions, Kubeconfig};

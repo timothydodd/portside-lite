@@ -23,6 +23,12 @@ pub struct ClusterSnapshot {
     pub storage_classes: Vec<StorageClassInfo>,
     /// ConfigMaps and Secrets. Key names and sizes only, never values.
     pub configs: Vec<ConfigInfo>,
+    pub service_accounts: Vec<ServiceAccountInfo>,
+    /// Image registries: every host an image is pulled from, plus hosts a
+    /// pull secret holds credentials for.
+    pub registries: Vec<RegistryInfo>,
+    /// Volume backups Portside set up (CronJobs labelled `portside-lite/backup`).
+    pub backups: Vec<BackupInfo>,
     /// Recent Warning events, newest first.
     pub events: Vec<EventInfo>,
     pub issues: Vec<Issue>,
@@ -154,12 +160,16 @@ pub struct WorkloadInfo {
     /// Disabled through Portside: scaled to 0 with the prior replica count
     /// remembered in [`DISABLED_REPLICAS_ANNOTATION`]. `None` = not disabled.
     pub disabled_replicas: Option<i32>,
+    /// Scaled to 0 by this backup (its name) for a copy. Still set when no
+    /// run is going = a run left it offline.
+    pub backup_offline: Option<String>,
     /// Failure/progress condition message worth surfacing, if any.
     pub condition_message: Option<String>,
     pub created_ms: Option<i64>,
     /// CronJobs only.
     pub schedule: Option<String>,
     pub last_schedule_ms: Option<i64>,
+    pub last_successful_ms: Option<i64>,
     /// PersistentVolumeClaims its pods mount (StatefulSet template claims
     /// included), for the Files tab.
     pub claims: Vec<String>,
@@ -326,6 +336,83 @@ pub struct ConfigInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct ServiceAccountInfo {
+    pub namespace: String,
+    pub name: String,
+    /// `imagePullSecrets`: every pod running as this account gets them.
+    pub image_pull_secrets: Vec<String>,
+    /// Of those, the ones that don't exist in the namespace.
+    pub missing_pull_secrets: Vec<String>,
+    /// `automountServiceAccountToken`; `None` = the default (mounted).
+    pub automount_token: Option<bool>,
+    /// Roles bound to it: "Role/x (RoleBinding y)", "ClusterRole/x (ClusterRoleBinding y)".
+    pub roles: Vec<String>,
+    /// Workloads whose pods run as it, as "Kind/name".
+    pub used_by: Vec<String>,
+    pub created_ms: Option<i64>,
+}
+
+/// A credential for a registry: a `kubernetes.io/dockerconfigjson` (or
+/// legacy `dockercfg`) Secret listing the host. Never the values.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryCredential {
+    pub namespace: String,
+    pub secret: String,
+    /// Username stored with it, if any (not secret; helps tell credentials apart).
+    pub username: Option<String>,
+    /// ServiceAccounts that hand it to their pods.
+    pub service_accounts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryInfo {
+    /// "docker.io", "ghcr.io", "registry.local:5000", …
+    pub host: String,
+    /// Distinct images in use from it, without the host.
+    pub images: Vec<String>,
+    /// Workloads pulling from it, as "namespace/Kind/name".
+    pub used_by: Vec<String>,
+    pub credentials: Vec<RegistryCredential>,
+    /// Workloads pulling from it with no pull secret for it (their own or
+    /// their ServiceAccount's), as "namespace/Kind/name". Fine for public
+    /// registries or node-level credentials (k3s `registries.yaml`); the
+    /// usual cause of pull errors on private ones.
+    pub without_credentials: Vec<String>,
+    /// Containers currently stuck on ImagePullBackOff / ErrImagePull with an image from here.
+    pub pull_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInfo {
+    pub namespace: String,
+    /// The backup's name; its CronJob and claim are `portside-backup-<name>`.
+    pub name: String,
+    pub cron_job: String,
+    /// What it was set up with. `None` if the CronJob's annotation is missing
+    /// or unreadable (edited by hand).
+    pub spec: Option<crate::backup::BackupSpec>,
+    pub schedule: String,
+    pub time_zone: Option<String>,
+    /// Paused: the CronJob is suspended.
+    pub suspended: bool,
+    /// A run is in progress.
+    pub running: bool,
+    pub last_schedule_ms: Option<i64>,
+    pub last_successful_ms: Option<i64>,
+    /// The newest finished run failed: why, and when it started.
+    pub last_failure: Option<String>,
+    pub last_failure_ms: Option<i64>,
+    /// The backup claim's phase and size (`None` = it doesn't exist).
+    pub claim_phase: Option<String>,
+    pub claim_capacity: Option<String>,
+    pub created_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct EventInfo {
     pub namespace: String,
     pub object_kind: String,
@@ -369,6 +456,8 @@ pub enum ActionKind {
     Scale,
     Cordon,
     Uncordon,
+    /// Start a volume backup now (the issue's object is its CronJob or one of its Jobs).
+    RunBackup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

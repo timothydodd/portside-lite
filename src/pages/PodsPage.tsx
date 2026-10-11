@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { RotateCcw, ScrollText } from "lucide-react";
 import * as ipc from "../lib/ipc";
-import { runAction } from "../lib/actions";
+import { restartPod, runAction } from "../lib/actions";
 import { fmtAge, fmtBytes, fmtCpu } from "../lib/format";
 import type { PodInfo, PodLogTotals } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
@@ -174,8 +174,12 @@ function PodsTable(props: {
                     <button className="btn-quiet" title="Logs" onClick={() => void runAction("viewLogs", { kind: "Pod", namespace: p.namespace, name: p.name })}>
                       <ScrollText size={14} />
                     </button>
-                    <button className="btn-quiet" title="Restart (delete) pod" onClick={() => void runAction("deletePod", { kind: "Pod", namespace: p.namespace, name: p.name })}>
-                      <RotateCcw size={14} />
+                    <button
+                      className="btn-quiet"
+                      title={p.ownerKind ? `Restart: delete it so ${p.ownerKind} ${p.ownerName ?? ""} starts a new one` : "Delete (no controller will replace it)"}
+                      onClick={() => void restartPod(p)}
+                    >
+                      <RotateCcw size={14} /> <span className="text-xs">Restart</span>
                     </button>
                   </td>
                 </tr>

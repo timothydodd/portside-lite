@@ -18,6 +18,8 @@ import { ForwardDialog } from "./components/Forwards";
 import ServicesPage from "./pages/ServicesPage";
 import ConfigPage from "./pages/ConfigPage";
 import StoragePage from "./pages/StoragePage";
+import BackupsPage from "./pages/BackupsPage";
+import BackupDialog from "./components/BackupDialog";
 import FilesDrawer from "./components/FileBrowser";
 import OverviewPage from "./pages/OverviewPage";
 import ProblemsPage from "./pages/ProblemsPage";
@@ -80,6 +82,7 @@ export default function App() {
             {page === "services" && <ServicesPage />}
             {page === "config" && <ConfigPage />}
             {page === "storage" && <StoragePage />}
+            {page === "backups" && <BackupsPage />}
             {page === "nodes" && <NodesPage />}
             {page === "events" && <EventsPage />}
             {page === "logs" && <LogsPage />}
@@ -141,6 +144,9 @@ export default function App() {
       )}
       <ErrorBoundary resetKey="forward">
         <ForwardDialog />
+      </ErrorBoundary>
+      <ErrorBoundary resetKey="backup">
+        <BackupDialog />
       </ErrorBoundary>
       <ScaleDialog />
       <DeleteDialog />

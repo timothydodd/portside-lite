@@ -4,12 +4,15 @@
 
 pub mod alerts;
 pub mod archive;
+pub mod backup;
 pub mod files;
 pub mod issues;
 pub mod logline;
 pub mod manifest;
 pub mod models;
 pub mod quantity;
+pub mod registry;
+pub mod schedule;
 pub mod settings;
 pub mod summarize;
 

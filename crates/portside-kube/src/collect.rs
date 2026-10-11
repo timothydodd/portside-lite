@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
-use k8s_openapi::api::core::v1::{ConfigMap, Event, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Event, Node, PersistentVolume, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
+};
+use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleBinding};
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::api::storage::v1::StorageClass;
 use kube::api::{Api, ListParams, ObjectList};
@@ -46,7 +49,7 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
     // Optional kinds: a restricted kubeconfig may not be allowed to list
     // Secrets or cluster-scoped storage, and not every cluster serves Ingress.
     // Empty rather than failing the whole poll.
-    let (services, configmaps, secrets, ingresses, hpas, pvs, storage_classes) = futures::join!(
+    let (services, configmaps, secrets, ingresses, hpas, pvs, storage_classes, accounts, bindings, cluster_bindings) = futures::join!(
         list_or_empty::<Service>(client, &all),
         list_or_empty::<ConfigMap>(client, &all),
         list_or_empty::<Secret>(client, &all),
@@ -54,6 +57,9 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         list_or_empty::<HorizontalPodAutoscaler>(client, &all),
         list_cluster_or_empty::<PersistentVolume>(client, &all),
         list_cluster_or_empty::<StorageClass>(client, &all),
+        list_or_empty::<ServiceAccount>(client, &all),
+        list_or_empty::<RoleBinding>(client, &all),
+        list_cluster_or_empty::<ClusterRoleBinding>(client, &all),
     );
     let unknown = [
         ("Service", services.1),
@@ -63,12 +69,16 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         ("HorizontalPodAutoscaler", hpas.1),
         ("PersistentVolume", pvs.1),
         ("StorageClass", storage_classes.1),
+        ("ServiceAccount", accounts.1),
+        ("RoleBinding", bindings.1),
+        ("ClusterRoleBinding", cluster_bindings.1),
     ]
     .into_iter()
     .filter_map(|(kind, failed)| failed.then_some(kind))
     .collect();
     let (services, configmaps, secrets, ingresses) = (services.0, configmaps.0, secrets.0, ingresses.0);
     let (hpas, pvs, storage_classes) = (hpas.0, pvs.0, storage_classes.0);
+    let (service_accounts, role_bindings, cluster_role_bindings) = (accounts.0, bindings.0, cluster_bindings.0);
     Ok(ClusterObjects {
         server_version: version,
         nodes,
@@ -87,6 +97,9 @@ pub async fn fetch_objects(client: &Client) -> Result<ClusterObjects> {
         hpas,
         pvs,
         storage_classes,
+        service_accounts,
+        role_bindings,
+        cluster_role_bindings,
         unknown,
     })
 }
@@ -107,7 +120,7 @@ where
     }
 }
 
-/// [`list_or_empty`] for cluster-scoped kinds (PersistentVolume, StorageClass).
+/// [`list_or_empty`] for cluster-scoped kinds (PersistentVolume, StorageClass, ClusterRoleBinding).
 async fn list_cluster_or_empty<K>(client: &Client, lp: &ListParams) -> (Vec<K>, bool)
 where
     K: kube::Resource<Scope = k8s_openapi::ClusterResourceScope>

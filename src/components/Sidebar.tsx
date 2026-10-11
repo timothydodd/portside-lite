@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   BarChart3,
   Boxes,
+  DatabaseBackup,
   FileKey,
   HardDrive,
   Network,
@@ -20,18 +21,47 @@ import { useClusterStore } from "../stores/cluster";
 import { useNavStore, type Page } from "../stores/nav";
 import { useThemeStore } from "../stores/theme";
 
-const ITEMS: { page: Page; label: string; Icon: LucideIcon }[] = [
-  { page: "overview", label: "Overview", Icon: LayoutDashboard },
-  { page: "problems", label: "Problems", Icon: AlertTriangle },
-  { page: "pods", label: "Pods", Icon: Boxes },
-  { page: "workloads", label: "Workloads", Icon: Layers },
-  { page: "services", label: "Services", Icon: Network },
-  { page: "config", label: "Config", Icon: FileKey },
-  { page: "storage", label: "Storage", Icon: HardDrive },
-  { page: "nodes", label: "Nodes", Icon: Server },
-  { page: "events", label: "Events", Icon: Activity },
-  { page: "logs", label: "Logs", Icon: ScrollText },
-  { page: "analytics", label: "Analytics", Icon: BarChart3 },
+const SECTIONS: { title: string | null; items: { page: Page; label: string; Icon: LucideIcon }[] }[] = [
+  {
+    title: null,
+    items: [
+      { page: "overview", label: "Overview", Icon: LayoutDashboard },
+      { page: "problems", label: "Problems", Icon: AlertTriangle },
+    ],
+  },
+  {
+    title: "Workloads",
+    items: [
+      { page: "workloads", label: "Workloads", Icon: Layers },
+      { page: "pods", label: "Pods", Icon: Boxes },
+    ],
+  },
+  {
+    title: "Network",
+    items: [{ page: "services", label: "Services", Icon: Network }],
+  },
+  {
+    title: "Config & storage",
+    items: [
+      { page: "config", label: "Config", Icon: FileKey },
+      { page: "storage", label: "Storage", Icon: HardDrive },
+      { page: "backups", label: "Backups", Icon: DatabaseBackup },
+    ],
+  },
+  {
+    title: "Cluster",
+    items: [
+      { page: "nodes", label: "Nodes", Icon: Server },
+      { page: "events", label: "Events", Icon: Activity },
+    ],
+  },
+  {
+    title: "Observe",
+    items: [
+      { page: "logs", label: "Logs", Icon: ScrollText },
+      { page: "analytics", label: "Analytics", Icon: BarChart3 },
+    ],
+  },
 ];
 
 export default function Sidebar() {
@@ -75,7 +105,14 @@ export default function Sidebar() {
         </div>
       </div>
       <ClusterSwitcher />
-      <div className="flex flex-col gap-0.5">{ITEMS.map((i) => item(i.page, i.label, i.Icon))}</div>
+      <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+        {SECTIONS.map((sec) => (
+          <div key={sec.title ?? "top"} className="flex flex-col gap-0.5">
+            {sec.title && <div className="card-title px-2.5 pb-0.5 text-[10px]">{sec.title}</div>}
+            {sec.items.map((i) => item(i.page, i.label, i.Icon))}
+          </div>
+        ))}
+      </div>
       <div className="mt-auto flex flex-col gap-0.5 border-t border-border-light pt-2">
         {item("settings", "Settings", Settings)}
         <button

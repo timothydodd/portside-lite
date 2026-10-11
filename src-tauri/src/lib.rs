@@ -128,10 +128,11 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let store = Arc::new(Store::open(&data_dir.join("portside-lite.db"))?);
 
-            let monitor = Monitor::new(store, Arc::new(TauriSink(app.handle().clone())));
+            let monitor = Monitor::new(store, Arc::new(TauriSink(app.handle().clone())), data_dir.clone());
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_poll_loop());
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_log_loop());
             tauri::async_runtime::spawn(Arc::clone(&monitor).run_sweep_loop());
+            tauri::async_runtime::spawn(Arc::clone(&monitor).run_local_backup_loop());
             app.manage(AppState { monitor, data_dir });
             build_tray(app)?;
             // Windows start hidden (see tauri.conf.json) so `--tray` (used by the
@@ -195,6 +196,15 @@ pub fn run() {
             commands::export_bundle,
             commands::get_config,
             commands::save_config,
+            commands::add_registry_credential,
+            commands::save_backup,
+            commands::run_backup_now,
+            commands::set_backup_paused,
+            commands::remove_backup,
+            commands::local_backup_status,
+            commands::local_backup_archives,
+            commands::run_local_backups,
+            commands::open_backup_folder,
             commands::copy_to_cluster,
             commands::set_workload_disabled,
             commands::delete_workload,

@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
-import { Download, FileCode2, Lock } from "lucide-react";
+import { Download, FileCode2, KeyRound, Lock } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { saveYamlFile } from "../lib/files";
 import { errorMessage, fmtAge, fmtBytes } from "../lib/format";
-import type { ConfigInfo } from "../lib/types";
+import type { ClusterSnapshot, ConfigInfo } from "../lib/types";
+import RegistryCredentialDialog from "../components/RegistryCredentialDialog";
+import RegistryTable from "../components/RegistryTable";
+import ServiceAccountTable, { isSystemAccount } from "../components/ServiceAccountTable";
 import SnapshotGate from "../components/SnapshotGate";
 import { EmptyState, NamespaceSelect, PageHeader, SearchInput } from "../components/ui";
 import { useNavStore } from "../stores/nav";
@@ -25,68 +28,104 @@ async function exportOne(c: ConfigInfo) {
   }
 }
 
+type Tab = "ConfigMap" | "Secret" | "ServiceAccount" | "Registry";
+const TABS: { tab: Tab; label: string }[] = [
+  { tab: "ConfigMap", label: "ConfigMaps" },
+  { tab: "Secret", label: "Secrets" },
+  { tab: "ServiceAccount", label: "Service accounts" },
+  { tab: "Registry", label: "Registries" },
+];
+const SEARCH_HINT: Record<Tab, string> = {
+  ConfigMap: "Name or key…",
+  Secret: "Name or key…",
+  ServiceAccount: "Name, secret or role…",
+  Registry: "Host, image or secret…",
+};
+
 export default function ConfigPage() {
-  const [kind, setKind] = useState<"ConfigMap" | "Secret">("ConfigMap");
+  const [tab, setTab] = useState<Tab>("ConfigMap");
   const [namespace, setNamespace] = useState("");
   const [search, setSearch] = useState("");
   const [hideSystem, setHideSystem] = useState(true);
+  /** Add-credential dialog, prefilled with this registry host. */
+  const [adding, setAdding] = useState<string | null>(null);
   const { openConfig, openEditor } = useNavStore();
 
   return (
     <SnapshotGate>
       {(s) => (
-        <ConfigTable
-          configs={s.configs}
-          namespaces={s.namespaces}
-          {...{ kind, setKind, namespace, setNamespace, search, setSearch, hideSystem, setHideSystem, openConfig, openEditor }}
-        />
+        <div className="flex h-full flex-col">
+          <PageHeader title="Configuration">
+            {tab !== "Registry" && (
+              <label className="flex items-center gap-1.5 text-xs text-content-secondary">
+                <input type="checkbox" className="accent-brand" checked={hideSystem} onChange={(e) => setHideSystem(e.target.checked)} />
+                Hide system
+              </label>
+            )}
+            <NamespaceSelect namespaces={s.namespaces} value={namespace} onChange={setNamespace} />
+            <SearchInput value={search} onChange={setSearch} placeholder={SEARCH_HINT[tab]} className="w-56" />
+            {tab === "Registry" && (
+              <button className="btn-primary" onClick={() => setAdding("")}>
+                <KeyRound size={14} /> Add credential
+              </button>
+            )}
+          </PageHeader>
+          <div className="flex gap-1 border-b border-border-light px-6">
+            {TABS.map((t) => (
+              <button key={t.tab} className={`navtab ${tab === t.tab ? "navtab-active" : ""}`} onClick={() => setTab(t.tab)}>
+                {t.label} <span className="text-content-muted">{tabCount(s, t.tab, hideSystem)}</span>
+              </button>
+            ))}
+          </div>
+          {tab === "ServiceAccount" ? (
+            <ServiceAccountTable accounts={s.serviceAccounts} namespace={namespace} search={search} hideSystem={hideSystem} />
+          ) : tab === "Registry" ? (
+            <RegistryTable registries={s.registries} namespace={namespace} search={search} onAddCredential={setAdding} />
+          ) : (
+            <ConfigTable configs={s.configs} kind={tab} {...{ namespace, search, hideSystem, openConfig, openEditor }} />
+          )}
+          {adding != null && (
+            <RegistryCredentialDialog
+              host={adding}
+              namespace={namespace}
+              namespaces={s.namespaces}
+              accounts={s.serviceAccounts}
+              onClose={() => setAdding(null)}
+            />
+          )}
+        </div>
       )}
     </SnapshotGate>
   );
 }
 
+function tabCount(s: ClusterSnapshot, tab: Tab, hideSystem: boolean): number {
+  if (tab === "ServiceAccount") return s.serviceAccounts.filter((a) => !hideSystem || !isSystemAccount(a)).length;
+  if (tab === "Registry") return s.registries.length;
+  return s.configs.filter((c) => c.kind === tab && (!hideSystem || !isSystem(c))).length;
+}
+
 function ConfigTable(p: {
   configs: ConfigInfo[];
-  namespaces: string[];
   kind: "ConfigMap" | "Secret";
-  setKind: (k: "ConfigMap" | "Secret") => void;
   namespace: string;
-  setNamespace: (v: string) => void;
   search: string;
-  setSearch: (v: string) => void;
   hideSystem: boolean;
-  setHideSystem: (v: boolean) => void;
   openConfig: ReturnType<typeof useNavStore.getState>["openConfig"];
   openEditor: ReturnType<typeof useNavStore.getState>["openEditor"];
 }) {
   const now = Date.now();
-  const visible = useMemo(() => p.configs.filter((c) => !p.hideSystem || !isSystem(c)), [p.configs, p.hideSystem]);
-  const count = (k: string) => visible.filter((c) => c.kind === k).length;
   const rows = useMemo(() => {
     const q = p.search.toLowerCase();
-    return visible
+    return p.configs
+      .filter((c) => !p.hideSystem || !isSystem(c))
       .filter((c) => c.kind === p.kind && (!p.namespace || c.namespace === p.namespace))
       .filter((c) => !q || `${c.name} ${c.keys.join(" ")}`.toLowerCase().includes(q))
       .sort((a, b) => a.namespace.localeCompare(b.namespace) || a.name.localeCompare(b.name));
-  }, [visible, p.kind, p.namespace, p.search]);
+  }, [p.configs, p.hideSystem, p.kind, p.namespace, p.search]);
 
   return (
-    <div className="flex h-full flex-col">
-      <PageHeader title="Configuration">
-        <label className="flex items-center gap-1.5 text-xs text-content-secondary">
-          <input type="checkbox" className="accent-brand" checked={p.hideSystem} onChange={(e) => p.setHideSystem(e.target.checked)} />
-          Hide system
-        </label>
-        <NamespaceSelect namespaces={p.namespaces} value={p.namespace} onChange={p.setNamespace} />
-        <SearchInput value={p.search} onChange={p.setSearch} placeholder="Name or key…" className="w-56" />
-      </PageHeader>
-      <div className="flex gap-1 border-b border-border-light px-6">
-        {(["ConfigMap", "Secret"] as const).map((k) => (
-          <button key={k} className={`navtab ${p.kind === k ? "navtab-active" : ""}`} onClick={() => p.setKind(k)}>
-            {k}s <span className="text-content-muted">{count(k)}</span>
-          </button>
-        ))}
-      </div>
+    <>
       {rows.length === 0 ? (
         <EmptyState title={`No ${p.kind}s`}>{p.hideSystem && "System entries are hidden; untick “Hide system” to see them."}</EmptyState>
       ) : (
@@ -143,6 +182,6 @@ function ConfigTable(p: {
           </table>
         </div>
       )}
-    </div>
+    </>
   );
 }

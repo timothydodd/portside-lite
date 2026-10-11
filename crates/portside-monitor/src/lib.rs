@@ -3,6 +3,7 @@
 //! store. The Tauri layer spawns [`Monitor::run_poll_loop`] and
 //! [`Monitor::run_log_loop`] and forwards [`EventSink`] callbacks to the UI.
 
+pub mod backups;
 pub mod files;
 pub mod forwards;
 
@@ -118,6 +119,10 @@ pub struct Monitor {
     install_id: String,
     /// Cancel switches for running file transfers, by transfer id.
     transfers: files::Transfers,
+    /// The app's data folder (default home of the backup folder).
+    data_dir: std::path::PathBuf,
+    /// Backups made on this PC: job records, run-now requests, what's running.
+    local_backups: backups::LocalBackups,
 }
 
 fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = T> {
@@ -125,7 +130,7 @@ fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl s
 }
 
 impl Monitor {
-    pub fn new(store: Arc<Store>, sink: Arc<dyn EventSink>) -> Arc<Self> {
+    pub fn new(store: Arc<Store>, sink: Arc<dyn EventSink>, data_dir: std::path::PathBuf) -> Arc<Self> {
         // Unreadable settings fall back to defaults; the store kept a copy and the status says so.
         let (settings, load_error) = match store.load_settings() {
             Ok(s) => (s, None),
@@ -146,6 +151,7 @@ impl Monitor {
             message: load_error,
             ..Default::default()
         };
+        let local_backups = backups::LocalBackups::load(&store);
         Arc::new(Self {
             store,
             sink,
@@ -166,6 +172,8 @@ impl Monitor {
             next_file_session: std::sync::atomic::AtomicU64::new(1),
             install_id,
             transfers: Default::default(),
+            data_dir,
+            local_backups,
         })
     }
 
@@ -462,6 +470,13 @@ impl Monitor {
             }
             if objects.unknown.iter().any(|k| matches!(*k, "ConfigMap" | "Secret")) {
                 snap.configs = prev.configs.clone();
+            }
+            if objects.unknown.iter().any(|k| matches!(*k, "ServiceAccount" | "RoleBinding" | "ClusterRoleBinding")) {
+                snap.service_accounts = prev.service_accounts.clone();
+            }
+            // Credentials come from Secrets, and reach pods through accounts.
+            if objects.unknown.iter().any(|k| matches!(*k, "Secret" | "ServiceAccount")) {
+                snap.registries = prev.registries.clone();
             }
         }
         let mut found = issues::detect(&snap, &settings, now);
@@ -943,7 +958,7 @@ mod tests {
         settings.active_connection_id = Some("p1".into());
         store.save_settings(&settings).unwrap();
         let sink = Arc::new(FakeSink::default());
-        (Monitor::new(store, sink.clone()), sink)
+        (Monitor::new(store, sink.clone(), std::env::temp_dir()), sink)
     }
 
     fn crit(key: &str) -> Issue {

@@ -338,6 +338,21 @@ impl Store {
         Ok(settings)
     }
 
+    /// A small value kept next to the settings (job bookkeeping and the like).
+    pub fn get_value(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_value(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// A random id for this install, created on first use. It marks what the
     /// app leaves on a cluster (file-browser helper pods) as its own.
     pub fn install_id(&self) -> Result<String> {
@@ -1196,6 +1211,15 @@ mod tests {
         let second = page(Some(first[1].id));
         assert_eq!(second.iter().map(|r| r.message.as_str()).collect::<Vec<_>>(), ["a1", "b1"]);
         assert!(page(Some(second[1].id)).is_empty());
+    }
+
+    #[test]
+    fn values_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.get_value("k").unwrap(), None);
+        s.set_value("k", "1").unwrap();
+        s.set_value("k", "2").unwrap();
+        assert_eq!(s.get_value("k").unwrap().as_deref(), Some("2"));
     }
 
     #[test]

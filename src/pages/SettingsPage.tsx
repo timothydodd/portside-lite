@@ -4,8 +4,10 @@ import { Bell, CheckCircle2, FolderOpen, KeyRound, Laptop, Plus, PlugZap, Refres
 import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage, fmtAgo, fmtBytes, fmtCount } from "../lib/format";
+import { describeCron } from "../lib/schedule";
 import { SAVED_SECRET, type Connection, type ConnectionProfile, type Settings, type SshConnection, type StorageStats } from "../lib/types";
 import { ModeIcon, connectionSummary } from "../components/ClusterSwitcher";
+import SchedulePicker from "../components/SchedulePicker";
 import { PageHeader, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
 import { useNavStore } from "../stores/nav";
@@ -107,6 +109,7 @@ export default function SettingsPage() {
         <BackgroundSection draft={draft} set={set} />
         <DataSection />
         <ArchivesSection draft={draft} set={set} saved={saved} />
+        <LocalBackupsSection draft={draft} set={set} saved={saved} />
         <VolumeFilesSection draft={draft} set={set} />
         <AppearanceSection />
       </div>
@@ -754,6 +757,112 @@ function ArchivesSection({ draft, set, saved }: { draft: Settings; set: (p: Part
           </button>
         </div>
       </Labeled>
+    </Section>
+  );
+}
+
+function LocalBackupsSection({ draft, set, saved }: { draft: Settings; set: (p: Partial<Settings>) => void; saved: Settings | null }) {
+  const [folder, setFolder] = useState("");
+  useEffect(() => {
+    ipc.localBackupStatus().then((s) => setFolder(s.folder)).catch(() => setFolder(""));
+  }, [saved?.backupDir]);
+  const runNow = async () => {
+    try {
+      await ipc.runLocalBackups([...(saved?.backupPull ? (["pull"] as const) : []), ...(saved?.manifestBackup ? (["manifests"] as const) : [])]);
+      toast.success("Started. Progress shows on the Backups page.");
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+  };
+
+  return (
+    <Section
+      title="Backups to this PC"
+      description="Portside makes these for every saved connection on its own schedule, in this PC's time. A run missed while the PC was off or Portside was closed happens soon after it starts again."
+    >
+      <Labeled label="Backup folder" hint={<>In use: <span className="mono">{folder || "…"}</span>. Existing backups aren't moved when you change it.</>}>
+        <div className="flex gap-2">
+          <input
+            className="field flex-1"
+            value={draft.backupDir ?? ""}
+            placeholder="Default: backups in the app data folder"
+            onChange={(e) => set({ backupDir: e.target.value.trim() ? e.target.value : null })}
+          />
+          <button
+            className="btn-ghost"
+            title="Choose a folder"
+            aria-label="Browse"
+            onClick={async () => {
+              const d = await openFile({ multiple: false, directory: true });
+              if (typeof d === "string") set({ backupDir: d });
+            }}
+          >
+            <FolderOpen size={14} />
+          </button>
+          <button className="btn-ghost" title="Open the folder in use" onClick={() => void ipc.openBackupFolder(null).catch((e) => toast.error(errorMessage(e)))}>
+            Open
+          </button>
+        </div>
+      </Labeled>
+
+      <label className="flex items-start gap-2 text-sm text-content">
+        <input type="checkbox" className="accent-brand mt-0.5" checked={draft.backupPull} onChange={(e) => set({ backupPull: e.target.checked })} />
+        <span>
+          Copy volume backups to this PC
+          <span className="block text-xs text-content-muted">
+            The archives every volume backup (Backups page) keeps on its cluster, from every connection. Only new ones are copied. Until they're here, a
+            backup is on the same disk as the data it protects.
+          </span>
+        </span>
+      </label>
+      {draft.backupPull && (
+        <div className="flex flex-col gap-4 pl-6">
+          <SchedulePicker cron={draft.backupPullSchedule} allowCustom={false} onChange={(c) => set({ backupPullSchedule: c })} />
+          <NumberField
+            label="Keep on this PC"
+            value={draft.backupKeepLocal}
+            min={0}
+            suffix="newest archives per volume (0 = all)"
+            onChange={(n) => set({ backupKeepLocal: n })}
+          />
+        </div>
+      )}
+
+      <label className="flex items-start gap-2 text-sm text-content">
+        <input type="checkbox" className="accent-brand mt-0.5" checked={draft.manifestBackup} onChange={(e) => set({ manifestBackup: e.target.checked })} />
+        <span>
+          Back up manifests and cluster settings
+          <span className="block text-xs text-content-muted">
+            Workloads, Services, ConfigMaps, volume claims, ingresses and access rules in every namespace, plus cluster-wide settings (namespaces,
+            storage classes, cluster roles, CRDs, k3s Helm charts), as YAML you can bring back with Import. Secret values are never saved:
+            secrets-needed.md lists the Secrets to recreate.
+          </span>
+        </span>
+      </label>
+      {draft.manifestBackup && (
+        <div className="flex flex-col gap-4 pl-6">
+          <SchedulePicker cron={draft.manifestBackupSchedule} allowCustom={false} onChange={(c) => set({ manifestBackupSchedule: c })} />
+          <NumberField
+            label="Keep"
+            value={draft.manifestBackupKeep}
+            min={0}
+            suffix="newest backups per connection (0 = all)"
+            onChange={(n) => set({ manifestBackupKeep: n })}
+          />
+        </div>
+      )}
+
+      {(saved?.backupPull || saved?.manifestBackup) && (
+        <div className="flex items-center gap-3 text-xs text-content-muted">
+          <button className="btn-ghost" onClick={() => void runNow()}>
+            <RefreshCw size={14} /> Run now
+          </button>
+          <span>
+            {saved.backupPull && `Copies ${describeCron(saved.backupPullSchedule).toLowerCase()}. `}
+            {saved.manifestBackup && `Manifests ${describeCron(saved.manifestBackupSchedule).toLowerCase()}.`}
+          </span>
+        </div>
+      )}
     </Section>
   );
 }

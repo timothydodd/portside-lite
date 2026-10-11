@@ -141,10 +141,22 @@ pub fn clean_for_edit(obj: &mut Value) {
     }
 }
 
-/// Point a (cleaned) namespaced object at another namespace.
+/// Point a (cleaned) namespaced object at another namespace. A RoleBinding's
+/// ServiceAccount subjects in the old namespace move with it, so the copy
+/// grants the copied account rather than the original.
 pub fn retarget_namespace(obj: &mut Value, namespace: &str) {
+    let old = obj.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string);
     if let Some(Value::Object(m)) = obj.get_mut("metadata") {
         m.insert("namespace".into(), Value::String(namespace.into()));
+    }
+    if obj.get("kind").and_then(Value::as_str) != Some("RoleBinding") {
+        return;
+    }
+    let Some(old) = old.filter(|o| o != namespace) else { return };
+    for s in obj.get_mut("subjects").and_then(Value::as_array_mut).into_iter().flatten() {
+        if s.get("kind").and_then(Value::as_str) == Some("ServiceAccount") && s.get("namespace").and_then(Value::as_str) == Some(old.as_str()) {
+            s["namespace"] = Value::String(namespace.into());
+        }
     }
 }
 
@@ -173,9 +185,33 @@ fn pod_spec(obj: &Value) -> Option<&Value> {
     spec.get("containers").map(|_| spec) // Pod
 }
 
+/// The ServiceAccount a workload's pods run as (`default` when unset).
+pub fn service_account_name(obj: &Value) -> Option<String> {
+    let ps = pod_spec(obj)?;
+    Some(ps.get("serviceAccountName").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("default").to_string())
+}
+
+/// Pull secrets a ServiceAccount hands to its pods.
+fn account_pull_secrets(sa: &Value) -> Vec<String> {
+    sa.get("imagePullSecrets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("name").and_then(Value::as_str))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// ConfigMaps, Secrets, PVCs and the ServiceAccount a workload references,
-/// deduplicated and sorted.
+/// deduplicated and sorted. For a ServiceAccount: its pull secrets.
 pub fn references(obj: &Value) -> Vec<ObjectRef> {
+    if obj.get("kind").and_then(Value::as_str) == Some("ServiceAccount") {
+        let mut out: Vec<ObjectRef> = account_pull_secrets(obj).into_iter().map(|name| ObjectRef { kind: "Secret".into(), name }).collect();
+        out.sort();
+        out.dedup();
+        return out;
+    }
     let mut out = std::collections::BTreeSet::new();
     let Some(ps) = pod_spec(obj) else { return Vec::new() };
     let mut add = |kind: &str, name: Option<&str>| {
@@ -219,7 +255,7 @@ pub fn references(obj: &Value) -> Vec<ObjectRef> {
 }
 
 /// An object that belongs with a workload when exporting or copying it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RelatedRef {
     pub kind: String,
@@ -232,6 +268,47 @@ pub struct RelatedRef {
     pub sensitive: bool,
     /// Pre-ticked in the export/copy dialogs.
     pub default_selected: bool,
+    /// Related through the ServiceAccount the pods run as ("ServiceAccount/x"),
+    /// so every workload running as it needs it too.
+    #[serde(default)]
+    pub via: Option<String>,
+}
+
+/// The objects of a namespace that [`related_objects`] looks through.
+#[derive(Debug, Default, Clone)]
+pub struct NamespaceObjects {
+    pub services: Vec<Value>,
+    pub ingresses: Vec<Value>,
+    pub hpas: Vec<Value>,
+    pub service_accounts: Vec<Value>,
+    pub role_bindings: Vec<Value>,
+    pub roles: Vec<Value>,
+}
+
+fn name_at(v: &Value) -> Option<&str> {
+    v.pointer("/metadata/name").and_then(Value::as_str)
+}
+
+/// A RoleBinding grants `account` (in `namespace`) its role. Subjects
+/// without a namespace mean the binding's own.
+pub fn binds_account(binding: &Value, namespace: &str, account: &str) -> bool {
+    binding_accounts(binding).iter().any(|(ns, n)| ns.as_deref().unwrap_or(namespace) == namespace && n == account)
+}
+
+/// ServiceAccount subjects of a binding, as (namespace if set, name).
+pub fn binding_accounts(binding: &Value) -> Vec<(Option<String>, String)> {
+    binding
+        .get("subjects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|s| s.get("kind").and_then(Value::as_str) == Some("ServiceAccount"))
+        .filter_map(|s| {
+            let name = s.get("name").and_then(Value::as_str)?.to_string();
+            let ns = s.get("namespace").and_then(Value::as_str).filter(|n| !n.is_empty()).map(str::to_string);
+            Some((ns, name))
+        })
+        .collect()
 }
 
 fn labels_at(v: &Value, pointer: &str) -> serde_json::Map<String, Value> {
@@ -257,34 +334,93 @@ fn pod_template_labels(workload: &Value) -> serde_json::Map<String, Value> {
 }
 
 /// Everything that belongs with a workload: pod-spec references (ConfigMaps,
-/// Secrets, ServiceAccount, PVCs), Services selecting its pods, Ingresses
-/// routing to those Services, and HPAs scaling it. `services`, `ingresses`
-/// and `hpas` are the objects in the workload's namespace; `exists` answers
-/// for pod-spec references.
-pub fn related_objects(
-    workload: &Value,
-    services: &[Value],
-    ingresses: &[Value],
-    hpas: &[Value],
-    exists: impl Fn(&str, &str) -> bool,
-) -> Vec<RelatedRef> {
-    let mut out = Vec::new();
+/// Secrets, ServiceAccount, PVCs), what its ServiceAccount brings (pull
+/// secrets, RoleBindings to it and the Roles they grant), Services selecting
+/// its pods, Ingresses routing to those Services, and HPAs scaling it. A
+/// ServiceAccount itself gets its pull secrets, bindings and Roles. `ns` holds
+/// the objects of the workload's namespace; `exists` answers for pod-spec
+/// references and pull secrets.
+pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(&str, &str) -> bool) -> Vec<RelatedRef> {
+    let mut out: Vec<RelatedRef> = Vec::new();
+    let is_account = workload.get("kind").and_then(Value::as_str) == Some("ServiceAccount");
     for ObjectRef { kind, name } in references(workload) {
         let (reason, sensitive, default_selected) = match kind.as_str() {
+            "Secret" if is_account => ("pull secret it gives its pods (contains credentials)", true, false),
             "Secret" => ("used by its pods (contains credentials)", true, false),
             "PersistentVolumeClaim" => ("mounted by its pods; data isn't included, only the claim", false, false),
             "ServiceAccount" => ("its pods run as this account", false, true),
             _ => ("used by its pods", false, true),
         };
-        out.push(RelatedRef { exists: exists(&kind, &name), kind, name, reason: reason.into(), sensitive, default_selected });
+        out.push(RelatedRef { exists: exists(&kind, &name), kind, name, reason: reason.into(), sensitive, default_selected, via: None });
+    }
+
+    // What the account brings. For a workload that's whatever its pods run as.
+    let account = if is_account { name_at(workload).map(str::to_string) } else { service_account_name(workload) };
+    if let Some(account) = account {
+        let namespace = workload.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or_default();
+        let via = (!is_account).then(|| format!("ServiceAccount/{account}"));
+        // The default account isn't exported with a workload; its grants are
+        // offered but left unticked, since the target has its own default.
+        let pick = is_account || account != "default";
+        let have = |out: &[RelatedRef], kind: &str, name: &str| out.iter().any(|r| r.kind == kind && r.name == name);
+        if !is_account {
+            let sa = ns.service_accounts.iter().find(|s| name_at(s) == Some(account.as_str()));
+            for secret in sa.map(account_pull_secrets).unwrap_or_default() {
+                if !have(&out, "Secret", &secret) {
+                    out.push(RelatedRef {
+                        exists: exists("Secret", &secret),
+                        kind: "Secret".into(),
+                        reason: format!("pull secret of ServiceAccount {account} (contains credentials)"),
+                        name: secret,
+                        sensitive: true,
+                        default_selected: false,
+                        via: via.clone(),
+                    });
+                }
+            }
+        }
+        let mut roles: Vec<(String, String)> = Vec::new();
+        for rb in ns.role_bindings.iter().filter(|rb| binds_account(rb, namespace, &account)) {
+            let Some(rb_name) = name_at(rb) else { continue };
+            out.push(RelatedRef {
+                kind: "RoleBinding".into(),
+                name: rb_name.into(),
+                reason: format!("grants ServiceAccount {account} its permissions"),
+                exists: true,
+                sensitive: false,
+                default_selected: pick,
+                via: via.clone(),
+            });
+            if rb.pointer("/roleRef/kind").and_then(Value::as_str) == Some("Role") {
+                if let Some(role) = rb.pointer("/roleRef/name").and_then(Value::as_str) {
+                    roles.push((role.into(), rb_name.into()));
+                }
+            }
+        }
+        for (role, rb_name) in roles {
+            if !have(&out, "Role", &role) {
+                out.push(RelatedRef {
+                    exists: ns.roles.iter().any(|r| name_at(r) == Some(role.as_str())),
+                    kind: "Role".into(),
+                    name: role,
+                    reason: format!("granted by RoleBinding {rb_name}"),
+                    sensitive: false,
+                    default_selected: pick,
+                    via: via.clone(),
+                });
+            }
+        }
+    }
+    if is_account {
+        return out;
     }
 
     let labels = pod_template_labels(workload);
     let mut service_names = Vec::new();
-    for svc in services {
+    for svc in &ns.services {
         let selector = labels_at(svc, "/spec/selector");
         if selector_matches(&selector, &labels) {
-            if let Some(n) = svc.pointer("/metadata/name").and_then(Value::as_str) {
+            if let Some(n) = name_at(svc) {
                 service_names.push(n.to_string());
                 out.push(RelatedRef {
                     kind: "Service".into(),
@@ -293,15 +429,16 @@ pub fn related_objects(
                     exists: true,
                     sensitive: false,
                     default_selected: true,
+                    via: None,
                 });
             }
         }
     }
 
-    for ing in ingresses {
+    for ing in &ns.ingresses {
         let backends = ingress_backend_services(ing);
         if let Some(hit) = backends.iter().find(|b| service_names.contains(b)) {
-            if let Some(n) = ing.pointer("/metadata/name").and_then(Value::as_str) {
+            if let Some(n) = name_at(ing) {
                 out.push(RelatedRef {
                     kind: "Ingress".into(),
                     name: n.into(),
@@ -309,20 +446,18 @@ pub fn related_objects(
                     exists: true,
                     sensitive: false,
                     default_selected: true,
+                    via: None,
                 });
             }
         }
     }
 
-    let (wk, wn) = (
-        workload.get("kind").and_then(Value::as_str).unwrap_or_default(),
-        workload.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default(),
-    );
-    for hpa in hpas {
+    let (wk, wn) = (workload.get("kind").and_then(Value::as_str).unwrap_or_default(), name_at(workload).unwrap_or_default());
+    for hpa in &ns.hpas {
         let target_kind = hpa.pointer("/spec/scaleTargetRef/kind").and_then(Value::as_str);
         let target_name = hpa.pointer("/spec/scaleTargetRef/name").and_then(Value::as_str);
         if target_kind == Some(wk) && target_name == Some(wn) {
-            if let Some(n) = hpa.pointer("/metadata/name").and_then(Value::as_str) {
+            if let Some(n) = name_at(hpa) {
                 out.push(RelatedRef {
                     kind: "HorizontalPodAutoscaler".into(),
                     name: n.into(),
@@ -330,6 +465,7 @@ pub fn related_objects(
                     exists: true,
                     sensitive: false,
                     default_selected: true,
+                    via: None,
                 });
             }
         }
@@ -648,7 +784,8 @@ mod tests {
             json!({ "metadata": { "name": "web-hpa" }, "spec": { "scaleTargetRef": { "kind": "Deployment", "name": "web" } } }),
             json!({ "metadata": { "name": "x-hpa" }, "spec": { "scaleTargetRef": { "kind": "Deployment", "name": "x" } } }),
         ];
-        let rel = related_objects(&deployment(), &services, &ingresses, &hpas, |kind, _| kind != "PersistentVolumeClaim");
+        let ns = NamespaceObjects { services, ingresses, hpas, ..Default::default() };
+        let rel = related_objects(&deployment(), &ns, |kind, _| kind != "PersistentVolumeClaim");
         let summary: Vec<String> = rel.iter().map(|r| format!("{}/{}:{}:{}", r.kind, r.name, r.default_selected, r.exists)).collect();
         assert_eq!(
             summary,
@@ -664,5 +801,53 @@ mod tests {
             ]
         );
         assert!(rel.iter().filter(|r| r.kind == "Secret").all(|r| r.sensitive));
+    }
+
+    #[test]
+    fn service_account_brings_pull_secrets_and_permissions() {
+        let ns = NamespaceObjects {
+            service_accounts: vec![json!({ "kind": "ServiceAccount", "metadata": { "name": "web-sa" }, "imagePullSecrets": [{ "name": "ghcr" }, { "name": "quay" }] })],
+            role_bindings: vec![
+                json!({ "metadata": { "name": "web-rb" }, "roleRef": { "kind": "Role", "name": "reader" },
+                        "subjects": [{ "kind": "ServiceAccount", "name": "web-sa" }] }),
+                json!({ "metadata": { "name": "web-view" }, "roleRef": { "kind": "ClusterRole", "name": "view" },
+                        "subjects": [{ "kind": "ServiceAccount", "name": "web-sa", "namespace": "apps" }] }),
+                json!({ "metadata": { "name": "elsewhere" }, "roleRef": { "kind": "Role", "name": "x" },
+                        "subjects": [{ "kind": "ServiceAccount", "name": "web-sa", "namespace": "other" }] }),
+                json!({ "metadata": { "name": "other-rb" }, "roleRef": { "kind": "Role", "name": "y" },
+                        "subjects": [{ "kind": "User", "name": "web-sa" }] }),
+            ],
+            roles: vec![json!({ "metadata": { "name": "reader" } })],
+            ..Default::default()
+        };
+        let rel = related_objects(&deployment(), &ns, |_, _| true);
+        let via: Vec<String> = rel
+            .iter()
+            .filter(|r| r.via.is_some())
+            .map(|r| format!("{}/{}:{}:{}", r.kind, r.name, r.default_selected, r.exists))
+            .collect();
+        // ghcr is already a pod-spec reference, so only quay comes through the account.
+        assert_eq!(via, vec!["Secret/quay:false:true", "RoleBinding/web-rb:true:true", "RoleBinding/web-view:true:true", "Role/reader:true:true"]);
+        assert!(rel.iter().all(|r| r.via.as_deref().is_none_or(|v| v == "ServiceAccount/web-sa")));
+
+        let mut sa = ns.service_accounts[0].clone();
+        sa["metadata"]["namespace"] = json!("apps");
+        let own: Vec<String> = related_objects(&sa, &ns, |_, _| true).iter().map(|r| format!("{}/{}:{}", r.kind, r.name, r.via.is_some())).collect();
+        assert_eq!(own, vec!["Secret/ghcr:false", "Secret/quay:false", "RoleBinding/web-rb:false", "RoleBinding/web-view:false", "Role/reader:false"]);
+    }
+
+    #[test]
+    fn retargeted_role_binding_follows_its_accounts() {
+        let mut rb = json!({ "kind": "RoleBinding", "metadata": { "name": "rb", "namespace": "apps" },
+            "subjects": [
+                { "kind": "ServiceAccount", "name": "web-sa", "namespace": "apps" },
+                { "kind": "ServiceAccount", "name": "ci", "namespace": "tools" },
+                { "kind": "ServiceAccount", "name": "local" },
+            ] });
+        retarget_namespace(&mut rb, "staging");
+        assert_eq!(rb["metadata"]["namespace"], "staging");
+        assert_eq!(rb["subjects"][0]["namespace"], "staging");
+        assert_eq!(rb["subjects"][1]["namespace"], "tools", "accounts elsewhere stay put");
+        assert!(rb["subjects"][2].get("namespace").is_none());
     }
 }

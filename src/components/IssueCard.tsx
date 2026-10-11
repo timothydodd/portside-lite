@@ -7,7 +7,7 @@ import { useNavStore } from "../stores/nav";
 import { SeverityIcon } from "./ui";
 
 /** Kinds without a drawer: clicking the issue opens their YAML. */
-const YAML_KINDS = ["Service", "Ingress", "HorizontalPodAutoscaler", "PersistentVolumeClaim", "PersistentVolume"];
+const YAML_KINDS = ["Service", "Ingress", "HorizontalPodAutoscaler", "PersistentVolumeClaim", "PersistentVolume", "ServiceAccount"];
 
 export default function IssueCard({ issue, compact = false }: { issue: Issue; compact?: boolean }) {
   const { openPod, openNode, openLogs, openEditor } = useNavStore();
@@ -19,9 +19,8 @@ export default function IssueCard({ issue, compact = false }: { issue: Issue; co
     else if (YAML_KINDS.includes(issue.kind)) openEditor({ kind: issue.kind, namespace: issue.namespace ?? "", name: issue.name });
   };
   const clickable = issue.kind === "Pod" || issue.kind === "Node" || YAML_KINDS.includes(issue.kind);
-  const replicas = workloads?.find(
-    (w) => w.kind === issue.kind && w.namespace === issue.namespace && w.name === issue.name,
-  )?.desired;
+  const target = workloads?.find((w) => w.kind === issue.kind && w.namespace === issue.namespace && w.name === issue.name);
+  const replicas = target?.desired;
   const border =
     issue.severity === "critical" ? "border-l-critical" : issue.severity === "warning" ? "border-l-warning" : "border-l-info";
 
@@ -58,7 +57,7 @@ export default function IssueCard({ issue, compact = false }: { issue: Issue; co
                   if (a === "viewLogs" && issue.rule === "log-errors" && issue.namespace) {
                     openLogs({ namespace: issue.namespace, pod: issue.name, levels: ["error"] });
                   } else {
-                    void runAction(a, { kind: issue.kind, namespace: issue.namespace, name: issue.name, replicas });
+                    void runAction(a, { kind: issue.kind, namespace: issue.namespace, name: issue.name, replicas, remembered: target?.disabledReplicas });
                   }
                 }}
               >

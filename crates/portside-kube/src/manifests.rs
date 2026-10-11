@@ -6,8 +6,8 @@ use kube::core::{GroupVersionKind, TypeMeta};
 use kube::discovery::{self, ApiCapabilities, ApiResource, Scope};
 use kube::Client;
 use portside_core::manifest::{
-    apply_order, clean_for_edit, clean_for_export, references, related_objects, retarget_namespace, ManifestDoc,
-    ObjectRef, RelatedRef,
+    apply_order, clean_for_edit, clean_for_export, references, related_objects, retarget_namespace, service_account_name,
+    ManifestDoc, NamespaceObjects, ObjectRef, RelatedRef,
 };
 use std::collections::HashMap;
 use serde::Serialize;
@@ -27,9 +27,13 @@ fn group_version(kind: &str) -> Result<(&'static str, &'static str)> {
     Ok(match kind {
         "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" => ("apps", "v1"),
         "Job" | "CronJob" => ("batch", "v1"),
-        "Ingress" => ("networking.k8s.io", "v1"),
+        "Ingress" | "IngressClass" => ("networking.k8s.io", "v1"),
+        "PriorityClass" => ("scheduling.k8s.io", "v1"),
+        "CustomResourceDefinition" => ("apiextensions.k8s.io", "v1"),
+        "HelmChart" | "HelmChartConfig" => ("helm.cattle.io", "v1"),
         "HorizontalPodAutoscaler" => ("autoscaling", "v2"),
         "StorageClass" => ("storage.k8s.io", "v1"),
+        "Role" | "RoleBinding" | "ClusterRole" | "ClusterRoleBinding" => ("rbac.authorization.k8s.io", "v1"),
         "Pod" | "Service" | "ConfigMap" | "Secret" | "PersistentVolumeClaim" | "PersistentVolume" | "ServiceAccount" | "Namespace"
         | "Node" | "Event" | "Endpoints" => ("", "v1"),
         _ => return Err(other(format!("{kind} objects aren't handled here"))),
@@ -185,26 +189,41 @@ pub(crate) async fn list_values(client: &Client, kind: &str, namespace: &str) ->
     }
 }
 
-/// What belongs with a workload when exporting or copying it: pod-spec
-/// references, Services selecting its pods, Ingresses routing to them, HPAs.
+/// What belongs with a workload (or a ServiceAccount) when exporting or
+/// copying it: pod-spec references, what its ServiceAccount brings (pull
+/// secrets, RoleBindings, Roles), Services selecting its pods, Ingresses
+/// routing to them, HPAs.
 pub async fn related(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<Vec<RelatedRef>> {
     let workload = get_value(client, kind, Some(namespace), name).await?;
-    let (services, ingresses, hpas) = futures::try_join!(
-        list_values(client, "Service", namespace),
-        list_values(client, "Ingress", namespace),
-        list_values(client, "HorizontalPodAutoscaler", namespace),
-    )?;
+    let ns = namespace_objects(client, namespace).await?;
+    // Referenced by name, so they may not exist.
+    let mut wanted = references(&workload);
+    if let Some(account) = service_account_name(&workload) {
+        let sa = ns.service_accounts.iter().find(|s| s.pointer("/metadata/name").and_then(Value::as_str) == Some(account.as_str()));
+        wanted.extend(sa.map(references).unwrap_or_default());
+    }
     let mut present = std::collections::HashSet::new();
-    for r in references(&workload) {
+    for r in wanted {
         if let Ok((api, _)) = api_for_kind(client, &r.kind, Some(namespace)).await {
             if api.get_opt(&r.name).await.ok().flatten().is_some() {
                 present.insert((r.kind, r.name));
             }
         }
     }
-    Ok(related_objects(&workload, &services, &ingresses, &hpas, |k, n| {
-        present.contains(&(k.to_string(), n.to_string()))
-    }))
+    Ok(related_objects(&workload, &ns, |k, n| present.contains(&(k.to_string(), n.to_string()))))
+}
+
+/// The objects of a namespace that [`related_objects`] looks through.
+pub(crate) async fn namespace_objects(client: &Client, namespace: &str) -> Result<NamespaceObjects> {
+    let (services, ingresses, hpas, service_accounts, role_bindings, roles) = futures::try_join!(
+        list_values(client, "Service", namespace),
+        list_values(client, "Ingress", namespace),
+        list_values(client, "HorizontalPodAutoscaler", namespace),
+        list_values(client, "ServiceAccount", namespace),
+        list_values(client, "RoleBinding", namespace),
+        list_values(client, "Role", namespace),
+    )?;
+    Ok(NamespaceObjects { services, ingresses, hpas, service_accounts, role_bindings, roles })
 }
 
 /// One workload plus the chosen related objects as a single multi-document
@@ -220,6 +239,98 @@ pub async fn export_bundle(client: &Client, kind: &str, namespace: &str, name: &
         docs.push(to_yaml(&v)?);
     }
     Ok(docs.join("---\n"))
+}
+
+/// A manifest backup of a whole cluster, as files relative to the backup's folder.
+pub struct ManifestBackup {
+    pub files: Vec<(String, String)>,
+    pub objects: usize,
+    /// Kinds left out because the cluster doesn't serve them or this
+    /// connection may not list them.
+    pub skipped: Vec<String>,
+}
+
+/// Everything a manifest backup saves: `cluster/<Kind>.yaml` for the
+/// cluster-wide settings, `namespaces/<ns>/<Kind>.yaml` for the rest (each a
+/// multi-document file Import can apply), `secrets-needed.md` with Secret
+/// names and key names only, and a README. Secret values are never read
+/// into the backup.
+pub async fn manifest_backup(client: &Client, cluster: &str, taken_ms: i64) -> Result<ManifestBackup> {
+    use portside_core::backup::{keep_in_manifest_backup, secret_line, CLUSTER_KINDS, MANIFEST_KINDS, OPTIONAL_KINDS};
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    let mut objects = 0;
+    for kind in CLUSTER_KINDS.iter().chain(MANIFEST_KINDS) {
+        let listed = async {
+            let (api, ar) = api_for_kind(client, kind, None).await?;
+            Ok::<_, KubeError>((api.list(&ListParams::default()).await?.items, ar))
+        }
+        .await;
+        let (items, ar) = match listed {
+            Ok(v) => v,
+            // Not served (no k3s Helm controller), or not allowed: say so and go on.
+            Err(e) if OPTIONAL_KINDS.contains(kind) || e.api_status() == Some(403) => {
+                skipped.push(format!("{kind}: {e}"));
+                continue;
+            }
+            Err(e) => return Err(other(format!("Couldn't list {kind}s: {e}"))),
+        };
+        let mut by_file: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+        for obj in items {
+            let mut v = to_value(obj, &ar)?;
+            if !keep_in_manifest_backup(kind, &v) {
+                continue;
+            }
+            let ns = v.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string);
+            let name = v.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default().to_string();
+            clean_for_export(&mut v);
+            let path = match ns {
+                Some(ns) => format!("namespaces/{}/{kind}.yaml", portside_core::archive::safe_segment(&ns)),
+                None => format!("cluster/{kind}.yaml"),
+            };
+            by_file.entry(path).or_default().push((name, to_yaml(&v)?));
+        }
+        for (path, mut docs) in by_file {
+            docs.sort();
+            objects += docs.len();
+            files.push((path, docs.into_iter().map(|(_, y)| y).collect::<Vec<_>>().join("---\n")));
+        }
+    }
+
+    let mut secrets = String::from("# Secrets the workloads need\n\nNot in this backup: recreate these (same name, type and keys) before importing the workloads that use them.\n\n");
+    match Api::<k8s_openapi::api::core::v1::Secret>::all(client.clone()).list(&ListParams::default()).await {
+        Ok(list) => {
+            let mut lines: Vec<String> = list
+                .items
+                .iter()
+                .filter_map(|s| serde_json::to_value(s).ok())
+                .filter(|v| keep_in_manifest_backup("Secret", v))
+                .filter_map(|v| secret_line(&v))
+                .collect();
+            lines.sort();
+            secrets.push_str(&if lines.is_empty() { "None.".to_string() } else { lines.join("\n") });
+        }
+        Err(e) => {
+            secrets.push_str(&format!("Couldn't list Secrets: {e}"));
+            skipped.push(format!("Secret names: {e}"));
+        }
+    }
+    secrets.push('\n');
+    files.push(("secrets-needed.md".into(), secrets));
+
+    let when = portside_core::jiff::Timestamp::from_millisecond(taken_ms).map(|t| t.to_string()).unwrap_or_default();
+    let mut readme = format!(
+        "# Manifest backup of {cluster}\n\nTaken {when} by Portside Lite. {objects} objects.\n\n\
+         - `cluster/`: cluster-wide settings (namespaces, storage classes, cluster roles, CRDs, ...).\n\
+         - `namespaces/<namespace>/<Kind>.yaml`: everything else, one file per kind.\n\
+         - `secrets-needed.md`: Secrets aren't saved; this lists the ones to recreate.\n\n\
+         To restore, use Import in Portside (or `kubectl apply -f`): `cluster/` first, then the namespaces.\n"
+    );
+    if !skipped.is_empty() {
+        readme.push_str(&format!("\nLeft out:\n\n{}\n", skipped.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")));
+    }
+    files.push(("README.md".into(), readme));
+    Ok(ManifestBackup { files, objects, skipped })
 }
 
 #[derive(Debug, Clone, Serialize)]

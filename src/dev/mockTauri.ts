@@ -279,11 +279,12 @@ const snapshot: ClusterSnapshot = {
   nodes,
   pods,
   workloads: [
-    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, claims: [] },
-    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, claims: [] },
-    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null, claims: ["data-postgres-0"] },
-    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null, claims: ["legacy-uploads"] },
-    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H, claims: [] },
+    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [] },
+    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [] },
+    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["data-postgres-0"] },
+    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, backupOffline: null, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["legacy-uploads"] },
+    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H, lastSuccessfulMs: now - 9 * H, claims: [] },
+    { kind: "CronJob", namespace: "apps", name: "portside-backup-legacy-uploads", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["curlimages/curl:8.16.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 10 * 86_400_000, schedule: "0 2 * * *", lastScheduleMs: now - 7 * H, lastSuccessfulMs: now - 7 * H, claims: ["legacy-uploads", "portside-backup-legacy-uploads"] },
   ],
   volumes: [
     { namespace: "data", name: "data-postgres-0", phase: "Bound", storageClass: "local-path", capacity: "20Gi", volumeName: "pvc-1f2e", createdMs: now - 30 * 86_400_000, accessModes: ["ReadWriteOnce"], mountedBy: ["postgres-0"], usedBy: ["StatefulSet/postgres"], writeBlockers: ["Pod postgres-0 has it mounted (Pending).", "StatefulSet postgres is at 1 replica. Scale it to 0."] },
@@ -321,6 +322,20 @@ const snapshot: ClusterSnapshot = {
     { kind: "ConfigMap", namespace: "kube-system", name: "kube-root-ca.crt", secretType: null, keys: ["ca.crt"], sizeBytes: 570, immutable: false, usedBy: [], createdMs: now - 90 * 86_400_000 },
     { kind: "Secret", namespace: "apps", name: "billing-api-secrets", secretType: "Opaque", keys: ["DB_PASSWORD", "STRIPE_KEY"], sizeBytes: 64, immutable: false, usedBy: ["Deployment/billing-api"], createdMs: now - 30 * 86_400_000 },
     { kind: "Secret", namespace: "apps", name: "sh.helm.release.v1.web.v3", secretType: "helm.sh/release.v1", keys: ["release"], sizeBytes: 9200, immutable: false, usedBy: [], createdMs: now - 9 * 86_400_000 },
+    { kind: "Secret", namespace: "apps", name: "ghcr-pull", secretType: "kubernetes.io/dockerconfigjson", keys: [".dockerconfigjson"], sizeBytes: 180, immutable: false, usedBy: ["ServiceAccount/billing-api"], createdMs: now - 60 * 86_400_000 },
+  ],
+  serviceAccounts: [
+    { namespace: "apps", name: "billing-api", imagePullSecrets: ["ghcr-pull"], missingPullSecrets: [], automountToken: false, roles: ["Role/config-reader (RoleBinding billing-api-config)"], usedBy: ["Deployment/billing-api"], createdMs: now - 60 * 86_400_000 },
+    { namespace: "apps", name: "default", imagePullSecrets: ["old-registry"], missingPullSecrets: ["old-registry"], automountToken: null, roles: [], usedBy: ["Deployment/web-frontend", "Deployment/worker"], createdMs: now - 90 * 86_400_000 },
+    { namespace: "kube-system", name: "traefik", imagePullSecrets: [], missingPullSecrets: [], automountToken: null, roles: ["ClusterRole/traefik-kube-system (ClusterRoleBinding traefik-kube-system, all namespaces)"], usedBy: ["Deployment/traefik"], createdMs: now - 150 * 86_400_000 },
+  ],
+  registries: [
+    { host: "docker.io", images: ["rancher/mirrored-coredns-coredns:1.12.0", "traefik:v3.3"], usedBy: ["kube-system/Deployment/coredns", "kube-system/Deployment/traefik"], credentials: [], withoutCredentials: ["kube-system/Deployment/coredns", "kube-system/Deployment/traefik"], pullErrors: [] },
+    { host: "ghcr.io", images: ["example/billing-api:2.0.0", "example/web:1.4.2", "example/worker:1.4.2"], usedBy: ["apps/Deployment/billing-api", "apps/Deployment/web-frontend", "apps/Deployment/worker"], credentials: [{ namespace: "apps", secret: "ghcr-pull", username: "ci-bot", serviceAccounts: ["billing-api"] }], withoutCredentials: ["apps/Deployment/web-frontend", "apps/Deployment/worker"], pullErrors: ["apps/worker-6b7c8d9e0-klmno (app): ghcr.io/example/worker:1.4.3"] },
+  ],
+  backups: [
+    { namespace: "apps", name: "legacy-uploads", cronJob: "portside-backup-legacy-uploads", spec: { namespace: "apps", name: "legacy-uploads", claim: "legacy-uploads", schedule: "0 2 * * *", timeZone: "Europe/London", keep: 7, maxAgeHours: 36, claimSize: "5Gi", storageClass: null, offline: true, workloads: ["Deployment/legacy-api"], image: "curlimages/curl:8.16.0" }, schedule: "0 2 * * *", timeZone: "Europe/London", suspended: false, running: false, lastScheduleMs: now - 7 * H, lastSuccessfulMs: now - 7 * H, lastFailure: null, lastFailureMs: null, claimPhase: "Bound", claimCapacity: "5Gi", createdMs: now - 10 * 86_400_000 },
+    { namespace: "data", name: "data-postgres-0", cronJob: "portside-backup-data-postgres-0", spec: { namespace: "data", name: "data-postgres-0", claim: "data-postgres-0", schedule: "0 3 * * 0", timeZone: null, keep: 4, maxAgeHours: 180, claimSize: "20Gi", storageClass: null, offline: true, workloads: ["StatefulSet/postgres"], image: "curlimages/curl:8.16.0" }, schedule: "0 3 * * 0", timeZone: null, suspended: false, running: false, lastScheduleMs: now - 2 * H, lastSuccessfulMs: now - 9 * 86_400_000, lastFailure: "Job has reached the specified backoff limit", lastFailureMs: now - 2 * H, claimPhase: "Bound", claimCapacity: "20Gi", createdMs: now - 30 * 86_400_000 },
   ],
   events: [
     { namespace: "kube-system", objectKind: "Pod", objectName: "svclb-traefik-4c2d9a7f-very-long-generated-name-xk2p9", reason: "FailedCreatePodSandBox", message: "Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox: plugin type=\"flannel\" failed (add): open /run/flannel/subnet.env: no such file or directory", type: "Warning", count: 31, firstMs: now - 20 * 60_000, lastMs: now - 30_000, source: "kubelet" },
@@ -360,6 +375,13 @@ let settings: Settings = {
   monitoringPaused: false,
   archiveDir: null,
   filesHelperImage: "busybox:1.37",
+  backupPull: true,
+  backupPullSchedule: "0 7 * * *",
+  backupKeepLocal: 30,
+  manifestBackup: true,
+  manifestBackupSchedule: "0 3 * * *",
+  manifestBackupKeep: 30,
+  backupDir: null,
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -479,7 +501,31 @@ const handlers: Record<string, (a: Args) => unknown> = {
     { kind: "PersistentVolumeClaim", name: `${a.name}-data`, reason: "mounted by its pods; data isn't included, only the claim", exists: true, sensitive: false, defaultSelected: false },
     { kind: "Service", name: a.name as string, reason: "selects its pods", exists: true, sensitive: false, defaultSelected: true },
     { kind: "Ingress", name: "web", reason: `routes to Service ${a.name}`, exists: true, sensitive: false, defaultSelected: true },
+    { kind: "RoleBinding", name: `${a.name}-config`, reason: `grants ServiceAccount ${a.name} its permissions`, exists: true, sensitive: false, defaultSelected: true, via: `ServiceAccount/${a.name}` },
+    { kind: "Role", name: "config-reader", reason: `granted by RoleBinding ${a.name}-config`, exists: true, sensitive: false, defaultSelected: true, via: `ServiceAccount/${a.name}` },
   ],
+  save_backup: (a) => {
+    const spec = a.spec as { namespace: string; name: string; claimSize: string };
+    return [`created ${spec.claimSize} of backup storage (portside-backup-${spec.name})`, ...((a.spec as { offline: boolean }).offline ? ["allowed it to stop and start its workloads"] : []), `created CronJob portside-backup-${spec.name}`, ...(a.dryRun ? ["dry run, nothing changed"] : [])];
+  },
+  local_backup_status: () => ({
+    folder: "C:\\Users\\you\\AppData\\Roaming\\portside-lite\\backups",
+    activity: null,
+    profiles: [
+      { profileId: "homelab", name: "Homelab", folder: "ssh_ops_k3s-server_22", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 3 * H, error: null, summary: "2 new archives (84.2 MB) from 2 backups" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: now - 7 * H, error: null, summary: "214 objects" } },
+      { profileId: "local", name: "Local dev", folder: "local_homelab-dev", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 27 * H, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: "nothing new from 1 backup" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: null, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: null } },
+    ],
+  }),
+  local_backup_archives: () => [
+    { namespace: "apps", name: "legacy-uploads", count: 12, bytes: 512_000_000, newestMs: now - 3 * H },
+    { namespace: "data", name: "data-postgres-0", count: 3, bytes: 3_100_000_000, newestMs: now - 9 * 86_400_000 },
+  ],
+  run_local_backups: () => null,
+  open_backup_folder: () => null,
+  run_backup_now: (a) => `portside-backup-${a.name}-${Math.floor(Date.now() / 1000)}`,
+  set_backup_paused: () => null,
+  remove_backup: () => null,
+  add_registry_credential: (a) => [`Secret ${(a.credential as { namespace: string; name: string }).namespace}/${(a.credential as { name: string }).name} created`],
   export_bundle: (a) => `# ${(a.extras as unknown[]).length + 1} objects\napiVersion: v1\nkind: Service\nmetadata:\n  name: ${a.name}\n---\napiVersion: apps/v1\nkind: ${a.kind}\nmetadata:\n  name: ${a.name}\n`,
   get_config: (a) => ({
     kind: a.kind,

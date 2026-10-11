@@ -28,10 +28,17 @@ in an archive are in plain YAML.**
 
 **Volume file downloads** go wherever you save them.
 
+**Backups to this PC** go to the backup folder (Settings → Backups to this PC; default `backups` in
+the app data folder), one folder per connection. Copied volume backups are the volume's files as
+they were, in plain `.tar.gz` archives, so they hold whatever the app stored there (database files
+included). Manifest backups are plain YAML **without Secret values**: `secrets-needed.md` lists
+Secret names, types and key names only.
+
 ## On your cluster
 
-The app changes your cluster only when you take an action. The changes are what you'd expect from
-the action, plus the following:
+The app changes your cluster only when you take an action, with one standing exception you can
+turn off: copying volume backups to this PC (below). The changes are what you'd expect from the
+action, plus the following:
 
 - **Scale to 0** adds the annotation `portside-lite/disabled-replicas` to remember the replica count.
 - **Copy and import** use server-side apply with field manager `portside-lite`.
@@ -45,3 +52,14 @@ the action, plus the following:
   - It's deleted shortly after you close the browser, when you switch clusters, and when you quit.
     If the app crashes, the pod stops on its own after two hours.
   - **Pod Security policies.** A namespace whose policy forbids root pods will refuse the helper pod.
+- **Volume backups** you set up create, in the volume's namespace, a CronJob and a backup volume named
+  `portside-backup-<name>` (plus a ServiceAccount, Role and RoleBinding of the same name when the
+  app is taken offline). The Role can only read and scale the workloads you picked, and list pods.
+  The job runs `curlimages/curl` as root to read every file, mounts your volume read-only, and while
+  it copies, scales those workloads to 0 with the `portside-lite/disabled-replicas` and
+  `portside-lite/backup-offline` annotations. Removing the backup deletes all of it; the backup
+  volume only if you say so.
+- **Copying volume backups to this PC** (on by default, Settings → Backups to this PC) starts a
+  read-only `portside-files-…` helper pod on each backup volume, on its schedule, and deletes it when
+  the copy is done. It reads; it never changes anything.
+- **Manifest backups** only read.

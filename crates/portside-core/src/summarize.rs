@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ContainerStatus, Event, Node, PersistentVolumeClaim, Pod, PodSpec, Secret, Service,
+    ConfigMap, ContainerStatus, Event, Node, PersistentVolumeClaim, Pod, PodSpec, Secret, Service, ServiceAccount,
 };
+use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleBinding};
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::core::v1::PersistentVolume;
 use k8s_openapi::api::networking::v1::Ingress;
@@ -38,6 +39,9 @@ pub struct ClusterObjects {
     pub hpas: Vec<HorizontalPodAutoscaler>,
     pub pvs: Vec<PersistentVolume>,
     pub storage_classes: Vec<StorageClass>,
+    pub service_accounts: Vec<ServiceAccount>,
+    pub role_bindings: Vec<RoleBinding>,
+    pub cluster_role_bindings: Vec<ClusterRoleBinding>,
     /// Optional kinds whose list failed for a passing reason (not "forbidden"
     /// or "not served"): their vectors are empty because we don't know, not
     /// because there are none.
@@ -117,6 +121,9 @@ pub fn build_snapshot(
         .map(|c| storage_class_info(c, &persistent_volumes, &volumes))
         .collect();
     let configs = configs_info(objs);
+    let service_accounts = service_accounts_info(objs);
+    let registries = registries_info(objs);
+    let backups = backups_info(objs);
 
     let mut events: Vec<EventInfo> = objs.events.iter().map(event_info).collect();
     events.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
@@ -165,6 +172,9 @@ pub fn build_snapshot(
         persistent_volumes,
         storage_classes,
         configs,
+        service_accounts,
+        registries,
+        backups,
         events,
         issues: Vec::new(),
         namespaces: namespaces.into_iter().collect(),
@@ -473,6 +483,14 @@ fn images(spec: &Option<PodSpec>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The backup that scaled it to 0, while it's at 0.
+fn backup_offline(meta: &ObjectMeta, desired: i32) -> Option<String> {
+    if desired != 0 {
+        return None;
+    }
+    meta.annotations.as_ref()?.get(crate::backup::OFFLINE_ANNOTATION).cloned()
+}
+
 /// Remembered replica count, only while the workload is actually at 0 (a
 /// manual scale-up makes a leftover annotation meaningless).
 fn disabled_replicas(meta: &ObjectMeta, desired: i32) -> Option<i32> {
@@ -508,6 +526,7 @@ fn deployment_info(d: &Deployment) -> WorkloadInfo {
         images: images(&spec.template.spec),
         paused: spec.paused.unwrap_or(false),
         disabled_replicas: disabled_replicas(&d.metadata, spec.replicas.unwrap_or(1)),
+        backup_offline: backup_offline(&d.metadata, spec.replicas.unwrap_or(1)),
         condition_message,
         created_ms: ms(&d.metadata.creation_timestamp),
         ..Default::default()
@@ -527,6 +546,7 @@ fn statefulset_info(s: &StatefulSet) -> WorkloadInfo {
         updated: st.updated_replicas.unwrap_or(0),
         images: images(&spec.template.spec),
         disabled_replicas: disabled_replicas(&s.metadata, spec.replicas.unwrap_or(1)),
+        backup_offline: backup_offline(&s.metadata, spec.replicas.unwrap_or(1)),
         created_ms: ms(&s.metadata.creation_timestamp),
         ..Default::default()
     }
@@ -595,6 +615,7 @@ fn cronjob_info(c: &CronJob) -> WorkloadInfo {
         paused: spec.suspend.unwrap_or(false),
         schedule: Some(spec.schedule.clone()),
         last_schedule_ms: ms(&st.last_schedule_time),
+        last_successful_ms: ms(&st.last_successful_time),
         created_ms: ms(&c.metadata.creation_timestamp),
         ..Default::default()
     }
@@ -942,6 +963,17 @@ fn configs_info(objs: &ClusterObjects) -> Vec<ConfigInfo> {
     for c in &objs.cronjobs {
         note("CronJob", &c.metadata, serde_json::to_value(c));
     }
+    for j in objs.jobs.iter().filter(|j| unowned(&j.metadata)) {
+        note("Job", &j.metadata, serde_json::to_value(j));
+    }
+    // Pull secrets handed out by a ServiceAccount are used by its pods.
+    for sa in &objs.service_accounts {
+        for ips in sa.image_pull_secrets.iter().flatten() {
+            used.entry((ns_of(&sa.metadata), "Secret".into(), ips.name.clone()))
+                .or_default()
+                .push(format!("ServiceAccount/{}", name_of(&sa.metadata)));
+        }
+    }
 
     let mut out = Vec::new();
     for c in &objs.configmaps {
@@ -983,6 +1015,250 @@ fn configs_info(objs: &ClusterObjects) -> Vec<ConfigInfo> {
         });
     }
     out
+}
+
+fn unowned(meta: &ObjectMeta) -> bool {
+    meta.owner_references.as_ref().is_none_or(|o| o.is_empty())
+}
+
+/// Every top-level thing that runs pods, as (namespace, "Kind/name", pod
+/// spec): workloads, Jobs no CronJob owns, and bare Pods.
+fn pod_specs(objs: &ClusterObjects) -> Vec<(String, String, &PodSpec)> {
+    fn add<'a>(out: &mut Vec<(String, String, &'a PodSpec)>, kind: &str, meta: &ObjectMeta, spec: Option<&'a PodSpec>) {
+        if let Some(spec) = spec {
+            out.push((ns_of(meta), format!("{kind}/{}", name_of(meta)), spec));
+        }
+    }
+    let mut out = Vec::new();
+    for d in &objs.deployments {
+        add(&mut out, "Deployment", &d.metadata, d.spec.as_ref().and_then(|s| s.template.spec.as_ref()));
+    }
+    for s in &objs.statefulsets {
+        add(&mut out, "StatefulSet", &s.metadata, s.spec.as_ref().and_then(|s| s.template.spec.as_ref()));
+    }
+    for d in &objs.daemonsets {
+        add(&mut out, "DaemonSet", &d.metadata, d.spec.as_ref().and_then(|s| s.template.spec.as_ref()));
+    }
+    for c in &objs.cronjobs {
+        add(&mut out, "CronJob", &c.metadata, c.spec.job_template.spec.as_ref().and_then(|j| j.template.spec.as_ref()));
+    }
+    for j in objs.jobs.iter().filter(|j| unowned(&j.metadata)) {
+        add(&mut out, "Job", &j.metadata, j.spec.as_ref().and_then(|s| s.template.spec.as_ref()));
+    }
+    for p in objs.pods.iter().filter(|p| unowned(&p.metadata)) {
+        add(&mut out, "Pod", &p.metadata, p.spec.as_ref());
+    }
+    out
+}
+
+fn service_account_of(spec: &PodSpec) -> String {
+    spec.service_account_name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| "default".into())
+}
+
+/// ServiceAccounts with their pull secrets, the roles bound to them and the
+/// workloads running as them.
+fn service_accounts_info(objs: &ClusterObjects) -> Vec<ServiceAccountInfo> {
+    let mut roles: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut bind = |binding_ns: Option<&str>, subjects: Option<&Vec<k8s_openapi::api::rbac::v1::Subject>>, role: String| {
+        for s in subjects.into_iter().flatten().filter(|s| s.kind == "ServiceAccount") {
+            // A RoleBinding subject without a namespace means the binding's own.
+            if let Some(ns) = s.namespace.as_deref().filter(|n| !n.is_empty()).or(binding_ns) {
+                roles.entry((ns.to_string(), s.name.clone())).or_default().push(role.clone());
+            }
+        }
+    };
+    for rb in &objs.role_bindings {
+        let ns = ns_of(&rb.metadata);
+        let role = format!("{}/{} (RoleBinding {})", rb.role_ref.kind, rb.role_ref.name, name_of(&rb.metadata));
+        bind(Some(&ns), rb.subjects.as_ref(), role);
+    }
+    for crb in &objs.cluster_role_bindings {
+        let role = format!("{}/{} (ClusterRoleBinding {}, all namespaces)", crb.role_ref.kind, crb.role_ref.name, name_of(&crb.metadata));
+        bind(None, crb.subjects.as_ref(), role);
+    }
+
+    let mut used: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (ns, who, spec) in pod_specs(objs) {
+        used.entry((ns, service_account_of(spec))).or_default().push(who);
+    }
+    let secrets: BTreeSet<(String, String)> = objs.secrets.iter().map(|s| (ns_of(&s.metadata), name_of(&s.metadata))).collect();
+    // Without Secret access (or before it loads) nothing can be called missing.
+    let can_check = !objs.secrets.is_empty() && !objs.unknown.contains(&"Secret");
+
+    let mut out: Vec<ServiceAccountInfo> = objs
+        .service_accounts
+        .iter()
+        .map(|sa| {
+            let (ns, name) = (ns_of(&sa.metadata), name_of(&sa.metadata));
+            let pull: Vec<String> = sa.image_pull_secrets.iter().flatten().map(|r| r.name.clone()).filter(|n| !n.is_empty()).collect();
+            let key = (ns.clone(), name.clone());
+            let mut roles = roles.remove(&key).unwrap_or_default();
+            roles.sort();
+            let mut used_by = used.remove(&key).unwrap_or_default();
+            used_by.sort();
+            ServiceAccountInfo {
+                missing_pull_secrets: if can_check {
+                    pull.iter().filter(|p| !secrets.contains(&(ns.clone(), (*p).clone()))).cloned().collect()
+                } else {
+                    Vec::new()
+                },
+                image_pull_secrets: pull,
+                automount_token: sa.automount_service_account_token,
+                roles,
+                used_by,
+                created_ms: ms(&sa.metadata.creation_timestamp),
+                namespace: ns,
+                name,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+    out
+}
+
+const PULL_ERRORS: [&str; 3] = ["ImagePullBackOff", "ErrImagePull", "InvalidImageName"];
+
+/// Backup CronJobs with their latest outcome, from their Jobs (each run is a
+/// Job owned by the CronJob) and their claim.
+fn backups_info(objs: &ClusterObjects) -> Vec<BackupInfo> {
+    use crate::backup;
+    let mut out: Vec<BackupInfo> = objs
+        .cronjobs
+        .iter()
+        .filter(|c| backup::is_backup(&c.metadata))
+        .map(|c| {
+            let namespace = ns_of(&c.metadata);
+            let cron_job = name_of(&c.metadata);
+            let st = c.status.clone().unwrap_or_default();
+            let owned = |j: &&Job| {
+                ns_of(&j.metadata) == namespace
+                    && j.metadata.owner_references.as_ref().is_some_and(|o| o.iter().any(|r| r.kind == "CronJob" && r.name == cron_job))
+            };
+            // The newest finished run decides whether the backup is failing.
+            let last = objs
+                .jobs
+                .iter()
+                .filter(owned)
+                .filter(|j| {
+                    j.status.as_ref().and_then(|s| s.conditions.as_ref()).is_some_and(|cs| {
+                        cs.iter().any(|c| (c.type_ == "Complete" || c.type_ == "Failed") && c.status == "True")
+                    })
+                })
+                .max_by_key(|j| ms(&j.metadata.creation_timestamp))
+                .map(job_info);
+            let (last_failure, last_failure_ms) = match last {
+                Some(j) if j.condition_message.is_some() => (j.condition_message, j.created_ms),
+                _ => (None, None),
+            };
+            let claim = objs
+                .pvcs
+                .iter()
+                .find(|p| ns_of(&p.metadata) == namespace && name_of(&p.metadata) == cron_job);
+            BackupInfo {
+                name: backup::backup_name(&cron_job).unwrap_or(&cron_job).to_string(),
+                spec: backup::spec_of(c),
+                schedule: c.spec.schedule.clone(),
+                time_zone: c.spec.time_zone.clone(),
+                suspended: c.spec.suspend.unwrap_or(false),
+                running: st.active.is_some_and(|a| !a.is_empty()),
+                last_schedule_ms: ms(&st.last_schedule_time),
+                last_successful_ms: ms(&st.last_successful_time),
+                last_failure,
+                last_failure_ms,
+                claim_phase: claim.map(|p| p.status.as_ref().and_then(|s| s.phase.clone()).unwrap_or_else(|| "Pending".into())),
+                claim_capacity: claim.and_then(|p| p.status.as_ref()?.capacity.as_ref()?.get("storage").map(|q| q.0.clone())),
+                created_ms: ms(&c.metadata.creation_timestamp),
+                namespace,
+                cron_job,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.namespace.cmp(&b.namespace).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// Registries rolled up from the images in use and the pull secrets in the
+/// cluster: who pulls from each, which credentials cover it, and where
+/// pulls are failing.
+fn registries_info(objs: &ClusterObjects) -> Vec<RegistryInfo> {
+    use crate::registry::{credential_hosts, split_image, DOCKER_CFG, DOCKER_CONFIG_JSON};
+
+    // (namespace, secret) → hosts it covers.
+    let mut secret_hosts: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut reg: BTreeMap<String, RegistryInfo> = BTreeMap::new();
+    let mut sa_pull: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for sa in &objs.service_accounts {
+        let pulls: Vec<String> = sa.image_pull_secrets.iter().flatten().map(|r| r.name.clone()).collect();
+        sa_pull.insert((ns_of(&sa.metadata), name_of(&sa.metadata)), pulls);
+    }
+
+    for s in &objs.secrets {
+        let t = s.type_.as_deref().unwrap_or_default();
+        let key = match t {
+            DOCKER_CONFIG_JSON => ".dockerconfigjson",
+            DOCKER_CFG => ".dockercfg",
+            _ => continue,
+        };
+        let Some(payload) = s.data.as_ref().and_then(|d| d.get(key)) else { continue };
+        let (ns, name) = (ns_of(&s.metadata), name_of(&s.metadata));
+        let mut via: Vec<String> = sa_pull
+            .iter()
+            .filter(|((sns, _), pulls)| *sns == ns && pulls.contains(&name))
+            .map(|((_, sa), _)| sa.clone())
+            .collect();
+        via.sort();
+        for (host, username) in credential_hosts(t, &payload.0) {
+            secret_hosts.entry((ns.clone(), name.clone())).or_default().push(host.clone());
+            reg.entry(host.clone()).or_insert_with(|| RegistryInfo { host, ..Default::default() }).credentials.push(RegistryCredential {
+                namespace: ns.clone(),
+                secret: name.clone(),
+                username,
+                service_accounts: via.clone(),
+            });
+        }
+    }
+
+    for (ns, who, spec) in pod_specs(objs) {
+        let mut pulls: Vec<String> = spec.image_pull_secrets.iter().flatten().map(|r| r.name.clone()).collect();
+        pulls.extend(sa_pull.get(&(ns.clone(), service_account_of(spec))).cloned().unwrap_or_default());
+        let covered: BTreeSet<&String> = pulls.iter().filter_map(|p| secret_hosts.get(&(ns.clone(), p.clone()))).flatten().collect();
+        let containers = spec.containers.iter().chain(spec.init_containers.iter().flatten());
+        for c in containers {
+            let Some(image) = c.image.as_deref().filter(|i| !i.is_empty()) else { continue };
+            let (host, rest) = split_image(image);
+            let r = reg.entry(host.clone()).or_insert_with(|| RegistryInfo { host: host.clone(), ..Default::default() });
+            r.images.push(rest);
+            r.used_by.push(format!("{ns}/{who}"));
+            if !covered.contains(&host) {
+                r.without_credentials.push(format!("{ns}/{who}"));
+            }
+        }
+    }
+
+    for p in &objs.pods {
+        let Some(status) = &p.status else { continue };
+        let statuses = status.container_statuses.iter().flatten().chain(status.init_container_statuses.iter().flatten());
+        for cs in statuses {
+            let waiting = cs.state.as_ref().and_then(|s| s.waiting.as_ref()).and_then(|w| w.reason.as_deref());
+            if !waiting.is_some_and(|r| PULL_ERRORS.contains(&r)) {
+                continue;
+            }
+            let (host, _) = split_image(&cs.image);
+            let r = reg.entry(host.clone()).or_insert_with(|| RegistryInfo { host, ..Default::default() });
+            r.pull_errors.push(format!("{}/{} ({}): {}", ns_of(&p.metadata), name_of(&p.metadata), cs.name, cs.image));
+        }
+    }
+
+    reg.into_values()
+        .map(|mut r| {
+            for v in [&mut r.images, &mut r.used_by, &mut r.without_credentials, &mut r.pull_errors] {
+                v.sort();
+                v.dedup();
+            }
+            r.credentials.sort_by(|a, b| (&a.namespace, &a.secret).cmp(&(&b.namespace, &b.secret)));
+            r
+        })
+        .collect()
 }
 
 fn event_info(e: &Event) -> EventInfo {
@@ -1143,5 +1419,118 @@ mod tests {
         let c = &snap.storage_classes[0];
         assert!(c.is_default);
         assert_eq!(c.volumes, 1);
+    }
+
+    #[test]
+    fn service_accounts_and_registries() {
+        use base64::Engine as _;
+        use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+        let config = serde_json::json!({ "auths": { "ghcr.io": { "auth": b64("alice:tok") } } }).to_string();
+        let secret: Secret = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "ghcr", "namespace": "apps" }, "type": "kubernetes.io/dockerconfigjson",
+            "data": { ".dockerconfigjson": b64(&config) }
+        }))
+        .unwrap();
+        let sa: ServiceAccount = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web-sa", "namespace": "apps" }, "imagePullSecrets": [{ "name": "ghcr" }, { "name": "gone" }]
+        }))
+        .unwrap();
+        let rb: RoleBinding = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web-rb", "namespace": "apps" },
+            "roleRef": { "apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "reader" },
+            "subjects": [{ "kind": "ServiceAccount", "name": "web-sa" }]
+        }))
+        .unwrap();
+        let deploy = |name: &str, sa: Option<&str>, image: &str| -> Deployment {
+            serde_json::from_value(serde_json::json!({
+                "metadata": { "name": name, "namespace": "apps" },
+                "spec": { "selector": {}, "template": { "spec": { "serviceAccountName": sa, "containers": [{ "name": "c", "image": image }] } } }
+            }))
+            .unwrap()
+        };
+        let stuck: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "api-1", "namespace": "apps", "ownerReferences": [{ "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "api-x", "uid": "u" }] },
+            "spec": { "containers": [{ "name": "app", "image": "ghcr.io/org/api:2" }] },
+            "status": { "phase": "Pending", "containerStatuses": [{
+                "name": "app", "image": "ghcr.io/org/api:2", "imageID": "", "ready": false, "restartCount": 0,
+                "state": { "waiting": { "reason": "ImagePullBackOff" } } }] }
+        }))
+        .unwrap();
+        let objs = ClusterObjects {
+            pods: vec![stuck],
+            deployments: vec![deploy("web", Some("web-sa"), "ghcr.io/org/web:1"), deploy("api", None, "ghcr.io/org/api:2"), deploy("cache", None, "redis:7")],
+            secrets: vec![secret],
+            service_accounts: vec![sa],
+            role_bindings: vec![rb],
+            ..Default::default()
+        };
+        let snap = build_snapshot("c", &objs, &UsageMetrics::default(), 0);
+
+        let sa = &snap.service_accounts[0];
+        assert_eq!(sa.image_pull_secrets, ["ghcr", "gone"]);
+        assert_eq!(sa.missing_pull_secrets, ["gone"]);
+        assert_eq!(sa.roles, ["Role/reader (RoleBinding web-rb)"]);
+        assert_eq!(sa.used_by, ["Deployment/web"]);
+
+        let hosts: Vec<&str> = snap.registries.iter().map(|r| r.host.as_str()).collect();
+        assert_eq!(hosts, ["docker.io", "ghcr.io"]);
+        let ghcr = &snap.registries[1];
+        assert_eq!(ghcr.images, ["org/api:2", "org/web:1"]);
+        assert_eq!(ghcr.credentials.len(), 1);
+        assert_eq!((ghcr.credentials[0].username.as_deref(), ghcr.credentials[0].service_accounts.clone()), (Some("alice"), vec!["web-sa".to_string()]));
+        assert_eq!(ghcr.without_credentials, ["apps/Deployment/api"], "web gets ghcr through its account");
+        assert_eq!(ghcr.pull_errors, ["apps/api-1 (app): ghcr.io/org/api:2"]);
+
+        let secret = snap.configs.iter().find(|c| c.name == "ghcr").unwrap();
+        assert_eq!(secret.used_by, ["ServiceAccount/web-sa"]);
+        assert!(crate::issues::detect(&snap, &Default::default(), 0).iter().any(|i| i.key == "missing-pull-secret:ServiceAccount/apps/web-sa"));
+    }
+
+    #[test]
+    fn backups_take_their_state_from_the_newest_finished_run() {
+        use crate::backup::{backup_claim, backup_cronjob, sample_spec};
+        let spec = sample_spec();
+        let mut cron = backup_cronjob(&spec);
+        cron.metadata.creation_timestamp = Some(Time("2026-10-01T00:00:00Z".parse().unwrap()));
+        cron.status = Some(serde_json::from_value(serde_json::json!({ "lastSuccessfulTime": "2026-10-09T02:01:00Z" })).unwrap());
+        let job = |name: &str, created: &str, outcome: &str, owner: &str| -> Job {
+            serde_json::from_value(serde_json::json!({
+                "metadata": {
+                    "name": name, "namespace": "shop", "creationTimestamp": created,
+                    "ownerReferences": [{ "apiVersion": "batch/v1", "kind": "CronJob", "name": owner, "uid": "u" }]
+                },
+                "status": { "conditions": [{ "type": outcome, "status": "True", "message": format!("{outcome} run") }] }
+            }))
+            .unwrap()
+        };
+        let mut claim = backup_claim(&spec);
+        claim.status = Some(serde_json::from_value(serde_json::json!({ "phase": "Bound", "capacity": { "storage": "1Gi" } })).unwrap());
+        let web: Deployment = serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "web", "namespace": "shop", "annotations": { crate::backup::OFFLINE_ANNOTATION: "uploads", DISABLED_REPLICAS_ANNOTATION: "2" } },
+            "spec": { "replicas": 0, "selector": {}, "template": { "spec": { "containers": [] } } }
+        }))
+        .unwrap();
+        let objs = ClusterObjects {
+            cronjobs: vec![cron],
+            pvcs: vec![claim],
+            deployments: vec![web],
+            jobs: vec![
+                job("portside-backup-uploads-1", "2026-10-09T02:00:00Z", "Complete", "portside-backup-uploads"),
+                job("portside-backup-uploads-2", "2026-10-10T02:00:00Z", "Failed", "portside-backup-uploads"),
+                // Another CronJob's newer run doesn't count.
+                job("other-3", "2026-10-11T02:00:00Z", "Complete", "other"),
+            ],
+            ..Default::default()
+        };
+        let snap = build_snapshot("c", &objs, &UsageMetrics::default(), 0);
+        let b = &snap.backups[0];
+        assert_eq!((b.name.as_str(), b.cron_job.as_str()), ("uploads", "portside-backup-uploads"));
+        assert_eq!(b.spec.as_ref(), Some(&spec));
+        assert_eq!(b.last_failure.as_deref(), Some("Failed run"));
+        assert!(b.last_failure_ms > b.last_successful_ms, "the failure is newer than the last success");
+        assert_eq!((b.claim_phase.as_deref(), b.claim_capacity.as_deref()), (Some("Bound"), Some("1Gi")));
+        let web = snap.workloads.iter().find(|w| w.name == "web").unwrap();
+        assert_eq!((web.backup_offline.as_deref(), web.disabled_replicas), (Some("uploads"), Some(2)));
     }
 }
