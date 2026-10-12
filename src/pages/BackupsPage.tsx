@@ -5,7 +5,7 @@ import { confirmDestructive } from "../lib/dialog";
 import { backupForClaim, backupState, isBackupClaim, lastRunPod } from "../lib/backups";
 import { errorMessage, fmtAgo, fmtBytes } from "../lib/format";
 import { describeCron } from "../lib/schedule";
-import type { BackupInfo, ClusterSnapshot, JobRecord, LocalArchives, LocalBackupStatus, VolumeClaimInfo } from "../lib/types";
+import type { BackupInfo, BackupJob, ClusterSnapshot, JobRecord, LocalArchives, LocalBackupStatus, ProfileBackupStatus, VolumeClaimInfo } from "../lib/types";
 import SnapshotGate from "../components/SnapshotGate";
 import { ActionMenu, EmptyState, Modal, NamespaceSelect, PageHeader, SearchInput, Spinner, StatusPill } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
@@ -106,7 +106,7 @@ export default function BackupsPage() {
   );
 }
 
-function JobLine({ label, enabled, schedule, rec }: { label: string; enabled: boolean; schedule: string; rec: JobRecord }) {
+function JobLine({ label, enabled, schedule, rec, state }: { label: string; enabled: boolean; schedule: string; rec: JobRecord; state: "running" | "queued" | null }) {
   const failed = rec.error && (rec.lastSuccessMs == null || (rec.lastAttemptMs ?? 0) > rec.lastSuccessMs);
   return (
     <div className="flex items-start gap-2 text-xs">
@@ -129,11 +129,18 @@ function JobLine({ label, enabled, schedule, rec }: { label: string; enabled: bo
               <span className="line-clamp-2">{rec.error}</span>
             </span>
           )}
-          <span className="block text-[11px] text-content-muted">{describeCron(schedule)}</span>
+          <span className="block text-[11px] text-content-muted">
+            {describeCron(schedule)}
+            {state && ` · ${state === "running" ? "running now" : "queued"}`}
+          </span>
         </span>
       )}
     </div>
   );
+}
+
+function jobState(p: ProfileBackupStatus, job: BackupJob) {
+  return p.running === job ? "running" : p.queued.includes(job) ? "queued" : null;
 }
 
 /** Backups this PC makes for every connection (set up under Settings). */
@@ -145,7 +152,7 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
   const runNow = async () => {
     try {
       await ipc.runLocalBackups([...(settings.backupPull ? (["pull"] as const) : []), ...(settings.manifestBackup ? (["manifests"] as const) : [])]);
-      toast.success("Started");
+      toast.success(status.activity ? "Queued after the current run" : "Started");
     } catch (e) {
       toast.error(errorMessage(e));
     }
@@ -158,11 +165,12 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
         {status.activity && (
           <span className="flex items-center gap-1.5 text-xs text-content-secondary">
             <Spinner size={12} /> {status.activity}
+            {status.queued > 0 && <span className="text-content-muted">· {status.queued} more queued</span>}
           </span>
         )}
         <span className="ml-auto flex gap-2">
           {any && (
-            <button className="btn-chip" disabled={!!status.activity} onClick={() => void runNow()}>
+            <button className="btn-chip" onClick={() => void runNow()}>
               <RefreshCw size={12} /> Run now
             </button>
           )}
@@ -191,8 +199,8 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
                   <FolderOpen size={13} />
                 </button>
               </div>
-              <JobLine label="Volume copies" enabled={settings.backupPull} schedule={settings.backupPullSchedule} rec={p.pull} />
-              <JobLine label="Manifests" enabled={settings.manifestBackup} schedule={settings.manifestBackupSchedule} rec={p.manifests} />
+              <JobLine label="Volume copies" enabled={settings.backupPull} schedule={settings.backupPullSchedule} rec={p.pull} state={jobState(p, "pull")} />
+              <JobLine label="Manifests" enabled={settings.manifestBackup} schedule={settings.manifestBackupSchedule} rec={p.manifests} state={jobState(p, "manifests")} />
             </div>
           ))}
         </div>

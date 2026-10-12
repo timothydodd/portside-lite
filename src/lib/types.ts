@@ -412,12 +412,18 @@ export interface ProfileBackupStatus {
   folder: string;
   pull: JobRecord;
   manifests: JobRecord;
+  /** The job running for this connection, if any. */
+  running: BackupJob | null;
+  /** Its jobs waiting their turn (jobs run one at a time across every connection). */
+  queued: BackupJob[];
 }
 
 export interface LocalBackupStatus {
   folder: string;
   /** What it's doing right now. */
   activity: string | null;
+  /** Jobs waiting their turn, across every connection. */
+  queued: number;
   profiles: ProfileBackupStatus[];
 }
 

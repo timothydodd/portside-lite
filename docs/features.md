@@ -173,9 +173,11 @@ PC's time):
 
 On disk: `<backup folder>/<connection>/volumes/<namespace>/<volume>/` and
 `<backup folder>/<connection>/manifests/<date_time>/` (with a README). A run missed while the PC
-was off happens soon after Portside starts again; a failed one is retried an hour later. The
-Backups page shows each connection's last copy and manifest backup (and any error), what's running,
-and how many copies of each volume are on this PC.
+was off or asleep happens as soon as Portside starts again or the PC wakes; a failed one is retried
+an hour later. Jobs run one at a time, across every connection: when several are due at once, or
+you press **Run now** during a run, the rest wait in a queue. The Backups page shows each
+connection's last copy and manifest backup (and any error), what's running and queued, and how many
+copies of each volume are on this PC.
 
 A failed run shows as **Volume backup failed** on Problems, and one that's overdue as **Volume
 backup is overdue**. Both offer **Run backup now**.

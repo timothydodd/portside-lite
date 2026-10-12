@@ -1,15 +1,16 @@
 //! Backups this PC makes for every saved connection, on the schedules in
 //! Settings (local time): copying the volume backups' archives off each
-//! cluster, and manifest backups of each cluster. A check every few minutes
-//! runs whatever is due, so a run missed while the PC was off or Portside
-//! closed happens soon after the next start. A failed run is retried an hour
-//! later rather than at every check.
+//! cluster, and manifest backups of each cluster. A check every minute queues
+//! whatever is due, so a run missed while the PC was off, asleep or Portside
+//! closed happens right after the next start or wake. Queued jobs run one at a
+//! time, across every connection, whether they came from a schedule or Run
+//! now. A failed run is retried an hour later rather than at every check.
 //!
 //! On disk, under the backup folder:
 //! `<cluster>/volumes/<namespace>/<backup>/<backup>-<UTC time>.tar.gz` and
 //! `<cluster>/manifests/<local time>/…` (see `manifests::manifest_backup`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,7 +26,11 @@ use crate::{blocking, Monitor};
 
 /// Where the job bookkeeping is kept (the store's settings table).
 const STATE_KEY: &str = "local_backups";
-const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
+const CHECK_EVERY: Duration = Duration::from_secs(60);
+/// Lets startup settle before the first check.
+const START_DELAY: Duration = Duration::from_secs(10);
+/// After the PC wakes, how long to give its network to come back.
+const WAKE_GRACE: Duration = Duration::from_secs(30);
 const RETRY_AFTER_MS: i64 = 60 * 60 * 1000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -64,6 +69,10 @@ pub struct ProfileBackupStatus {
     pub folder: String,
     pub pull: JobRecord,
     pub manifests: JobRecord,
+    /// The job running for this connection, if any.
+    pub running: Option<BackupJob>,
+    /// Its jobs waiting their turn.
+    pub queued: Vec<BackupJob>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +81,8 @@ pub struct LocalBackupStatus {
     pub folder: String,
     /// What it's doing right now, if anything.
     pub activity: Option<String>,
+    /// Jobs waiting their turn, across every connection.
+    pub queued: usize,
     pub profiles: Vec<ProfileBackupStatus>,
 }
 
@@ -87,11 +98,42 @@ pub struct LocalArchives {
     pub newest_ms: Option<i64>,
 }
 
+/// One job for one connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Queued {
+    profile_id: String,
+    job: BackupJob,
+}
+
+/// Jobs waiting, and the one running. One lock, so a job is never both.
+#[derive(Default)]
+struct JobQueue {
+    waiting: VecDeque<Queued>,
+    running: Option<Queued>,
+}
+
+impl JobQueue {
+    /// Adds it unless it's already waiting or running.
+    fn push(&mut self, item: Queued) -> bool {
+        if self.running.as_ref() == Some(&item) || self.waiting.contains(&item) {
+            return false;
+        }
+        self.waiting.push_back(item);
+        true
+    }
+
+    /// Takes the next job and marks it running.
+    fn start_next(&mut self) -> Option<Queued> {
+        self.running = self.waiting.pop_front();
+        self.running.clone()
+    }
+}
+
 /// State kept on the monitor.
 #[derive(Default)]
 pub(crate) struct LocalBackups {
     records: std::sync::Mutex<HashMap<String, ProfileRecord>>,
-    forced: std::sync::Mutex<Vec<BackupJob>>,
+    queue: std::sync::Mutex<JobQueue>,
     activity: std::sync::RwLock<Option<String>>,
     wake: tokio::sync::Notify,
 }
@@ -141,15 +183,28 @@ impl Monitor {
     pub fn local_backup_status(&self) -> LocalBackupStatus {
         let settings = self.settings();
         let records = self.local_backups.records.lock().unwrap().clone();
+        let (waiting, running) = {
+            let q = self.local_backups.queue.lock().unwrap();
+            (q.waiting.clone(), q.running.clone())
+        };
         LocalBackupStatus {
             folder: self.backup_root().to_string_lossy().into_owned(),
             activity: self.local_backups.activity.read().unwrap().clone(),
+            queued: waiting.len(),
             profiles: settings
                 .connections
                 .iter()
                 .map(|p| {
                     let r = records.get(&p.id).cloned().unwrap_or_default();
-                    ProfileBackupStatus { profile_id: p.id.clone(), name: p.name.clone(), folder: Self::cluster_folder(p), pull: r.pull, manifests: r.manifests }
+                    ProfileBackupStatus {
+                        profile_id: p.id.clone(),
+                        name: p.name.clone(),
+                        folder: Self::cluster_folder(p),
+                        pull: r.pull,
+                        manifests: r.manifests,
+                        running: running.as_ref().filter(|q| q.profile_id == p.id).map(|q| q.job),
+                        queued: waiting.iter().filter(|q| q.profile_id == p.id).map(|q| q.job).collect(),
+                    }
                 })
                 .collect(),
         }
@@ -189,22 +244,58 @@ impl Monitor {
         .await
     }
 
-    /// Run these jobs for every connection now, whatever their schedule.
+    /// Queue these jobs for every connection, whatever their schedule. They
+    /// run after anything already queued.
     pub fn run_local_backups_now(&self, jobs: &[BackupJob]) {
-        self.local_backups.forced.lock().unwrap().extend_from_slice(jobs);
+        let settings = self.settings();
+        let mut q = self.local_backups.queue.lock().unwrap();
+        for p in &settings.connections {
+            for job in jobs {
+                q.push(Queued { profile_id: p.id.clone(), job: *job });
+            }
+        }
+        drop(q);
         self.local_backups.wake.notify_one();
     }
 
     pub async fn run_local_backup_loop(self: std::sync::Arc<Self>) {
-        // Let startup (and the first poll) settle first.
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(START_DELAY).await;
+        let mut last_check = now_ms();
         loop {
-            if !self.settings.read().unwrap().monitoring_paused {
-                self.local_backups_once().await;
+            // Far more time passed than the wait asked for: the PC was asleep.
+            // Its network may not be back yet, and a failed run waits an hour.
+            if now_ms() - last_check > 2 * CHECK_EVERY.as_millis() as i64 {
+                tokio::time::sleep(WAKE_GRACE).await;
             }
+            if !self.paused() {
+                self.queue_due_jobs();
+                self.run_queue().await;
+            }
+            last_check = now_ms();
             tokio::select! {
                 _ = tokio::time::sleep(CHECK_EVERY) => {}
                 _ = self.local_backups.wake.notified() => {}
+            }
+        }
+    }
+
+    fn paused(&self) -> bool {
+        self.settings.read().unwrap().monitoring_paused
+    }
+
+    /// Queues every job whose scheduled time has passed since it last succeeded.
+    fn queue_due_jobs(&self) {
+        let settings = self.settings();
+        let (now, now_local) = (now_ms(), Local::now().naive_local());
+        let records = self.local_backups.records.lock().unwrap().clone();
+        let mut q = self.local_backups.queue.lock().unwrap();
+        for p in &settings.connections {
+            let rec = records.get(&p.id).cloned().unwrap_or_default();
+            if settings.manifest_backup && due(&settings.manifest_backup_schedule, &rec.manifests, now_local, now) {
+                q.push(Queued { profile_id: p.id.clone(), job: BackupJob::Manifests });
+            }
+            if settings.backup_pull && due(&settings.backup_pull_schedule, &rec.pull, now_local, now) {
+                q.push(Queued { profile_id: p.id.clone(), job: BackupJob::Pull });
             }
         }
     }
@@ -238,49 +329,43 @@ impl Monitor {
         let _ = self.store.set_value(STATE_KEY, &json);
     }
 
-    async fn local_backups_once(&self) {
-        let settings = self.settings();
-        let forced: Vec<BackupJob> = std::mem::take(&mut *self.local_backups.forced.lock().unwrap());
-        let root = self.backup_root();
-        for p in &settings.connections {
-            let rec = self.local_backups.records.lock().unwrap().get(&p.id).cloned().unwrap_or_default();
-            let (now, now_local) = (now_ms(), Local::now().naive_local());
-            let manifests = forced.contains(&BackupJob::Manifests)
-                || (settings.manifest_backup && due(&settings.manifest_backup_schedule, &rec.manifests, now_local, now));
-            let pull = forced.contains(&BackupJob::Pull) || (settings.backup_pull && due(&settings.backup_pull_schedule, &rec.pull, now_local, now));
-            if !manifests && !pull {
-                continue;
+    /// Runs queued jobs one at a time until the queue is empty (or monitoring
+    /// is paused; what's left waits). Jobs queued meanwhile join the line.
+    async fn run_queue(&self) {
+        // Back-to-back jobs for one connection share its connection (or its failure).
+        let mut conn: Option<(String, Result<std::sync::Arc<ClusterClient>, String>)> = None;
+        while !self.paused() {
+            let Some(item) = self.local_backups.queue.lock().unwrap().start_next() else { break };
+            let settings = self.settings();
+            // Deleted while it waited.
+            let Some(p) = settings.connections.iter().find(|p| p.id == item.profile_id) else { continue };
+            if conn.as_ref().is_none_or(|(id, _)| *id != p.id) {
+                drop(conn.take()); // close the last one (and its SSH tunnel) before opening another
+                self.set_activity(Some(format!("Connecting to {}", p.name)));
+                let connected = match tokio::time::timeout(CONNECT_TIMEOUT, self.connect_profile(&p.id)).await {
+                    Ok(Ok(cc)) => Ok(cc),
+                    Ok(Err(e)) => Err(format!("Couldn't connect: {e}")),
+                    Err(_) => Err(format!("Couldn't connect within {} s.", CONNECT_TIMEOUT.as_secs())),
+                };
+                conn = Some((p.id.clone(), connected));
             }
-            self.set_activity(Some(format!("Connecting to {}", p.name)));
-            let connected = match tokio::time::timeout(CONNECT_TIMEOUT, self.connect_profile(&p.id)).await {
-                Ok(Ok(cc)) => Ok(cc),
-                Ok(Err(e)) => Err(format!("Couldn't connect: {e}")),
-                Err(_) => Err(format!("Couldn't connect within {} s.", CONNECT_TIMEOUT.as_secs())),
-            };
-            let cc = match connected {
-                Ok(cc) => cc,
-                Err(e) => {
-                    for (job, wanted) in [(BackupJob::Manifests, manifests), (BackupJob::Pull, pull)] {
-                        if wanted {
-                            self.record(&p.id, job, now, Err(e.clone()));
+            let started = now_ms();
+            let result = match &conn.as_ref().expect("connected above").1 {
+                Ok(cc) => {
+                    let folder = self.backup_root().join(Self::cluster_folder(p));
+                    match item.job {
+                        BackupJob::Manifests => {
+                            self.set_activity(Some(format!("Backing up {}'s manifests", p.name)));
+                            self.manifest_backup_once(cc, &p.name, &folder.join("manifests"), settings.manifest_backup_keep).await
                         }
+                        BackupJob::Pull => self.pull_backups(cc, &p.name, &folder.join("volumes"), &settings).await,
                     }
-                    continue;
                 }
+                Err(e) => Err(e.clone()),
             };
-            let folder = root.join(Self::cluster_folder(p));
-            if manifests {
-                self.set_activity(Some(format!("Backing up {}'s manifests", p.name)));
-                let started = now_ms();
-                let result = self.manifest_backup_once(&cc, &p.name, &folder.join("manifests"), settings.manifest_backup_keep).await;
-                self.record(&p.id, BackupJob::Manifests, started, result);
-            }
-            if pull {
-                let started = now_ms();
-                let result = self.pull_backups(&cc, &p.name, &folder.join("volumes"), &settings).await;
-                self.record(&p.id, BackupJob::Pull, started, result);
-            }
+            self.record(&p.id, item.job, started, result);
         }
+        self.local_backups.queue.lock().unwrap().running = None;
         self.set_activity(None);
     }
 
@@ -433,6 +518,24 @@ mod tests {
         let failed_earlier = rec(Some(now - 2 * RETRY_AFTER_MS), Some(due_at - 86_400_000));
         assert!(due(daily, &failed_earlier, now_local, now), "failed two hours ago: try again");
         assert!(!due("not a schedule", &rec(None, None), now_local, now));
+    }
+
+    #[test]
+    fn queue_runs_each_job_once_in_order() {
+        let job = |id: &str, job| Queued { profile_id: id.into(), job };
+        let mut q = JobQueue::default();
+        assert!(q.push(job("a", BackupJob::Pull)));
+        assert!(q.push(job("b", BackupJob::Pull)));
+        assert!(!q.push(job("a", BackupJob::Pull)), "already waiting");
+        assert_eq!(q.start_next(), Some(job("a", BackupJob::Pull)));
+        assert!(!q.push(job("a", BackupJob::Pull)), "already running");
+        assert!(q.push(job("a", BackupJob::Manifests)));
+        assert_eq!(q.start_next(), Some(job("b", BackupJob::Pull)));
+        assert!(q.push(job("a", BackupJob::Pull)), "finished, so it can queue again");
+        assert_eq!(q.start_next(), Some(job("a", BackupJob::Manifests)));
+        assert_eq!(q.start_next(), Some(job("a", BackupJob::Pull)));
+        assert_eq!(q.start_next(), None);
+        assert_eq!(q.running, None);
     }
 
     #[test]

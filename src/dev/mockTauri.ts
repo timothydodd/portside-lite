@@ -511,9 +511,10 @@ const handlers: Record<string, (a: Args) => unknown> = {
   local_backup_status: () => ({
     folder: "C:\\Users\\you\\AppData\\Roaming\\portside-lite\\backups",
     activity: null,
+    queued: 0,
     profiles: [
-      { profileId: "homelab", name: "Homelab", folder: "ssh_ops_k3s-server_22", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 3 * H, error: null, summary: "2 new archives (84.2 MB) from 2 backups" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: now - 7 * H, error: null, summary: "214 objects" } },
-      { profileId: "local", name: "Local dev", folder: "local_homelab-dev", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 27 * H, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: "nothing new from 1 backup" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: null, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: null } },
+      { profileId: "homelab", name: "Homelab", folder: "ssh_ops_k3s-server_22", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 3 * H, error: null, summary: "2 new archives (84.2 MB) from 2 backups" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: now - 7 * H, error: null, summary: "214 objects" }, running: null, queued: [] },
+      { profileId: "local", name: "Local dev", folder: "local_homelab-dev", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 27 * H, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: "nothing new from 1 backup" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: null, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: null }, running: null, queued: [] },
     ],
   }),
   local_backup_archives: () => [
