@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import { AlertTriangle, Copy, Download, FileCode2 } from "lucide-react";
+import { AlertTriangle, Copy, Download, FileCode2, Trash2 } from "lucide-react";
 import { fmtAge } from "../lib/format";
 import type { ServiceAccountInfo } from "../lib/types";
 import { useNavStore } from "../stores/nav";
 import { ActionMenu, EmptyState } from "./ui";
+import { useDeleteDialog } from "../lib/actions";
 
 const SYSTEM_NAMESPACES = ["kube-system", "kube-public", "kube-node-lease"];
 
@@ -104,6 +105,14 @@ export default function ServiceAccountTable(p: { accounts: ServiceAccountInfo[];
                       { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => openEditor(ref) },
                       { label: "Export…", icon: <Download size={14} />, title: "Export with its pull secrets, RoleBindings and Roles", onSelect: () => openExport(ref) },
                       { label: "Copy to…", icon: <Copy size={14} />, title: "Copy to another cluster or namespace", onSelect: () => openCopy(ref) },
+                      {
+                        label: "Delete ServiceAccount…",
+                        icon: <Trash2 size={14} />,
+                        danger: true,
+                        disabled: a.name === "default",
+                        title: a.name === "default" ? "The cluster recreates the default account; remove its bindings or pull secrets instead" : undefined,
+                        onSelect: () => useDeleteDialog.getState().open({ ...ref, dependents: a.usedBy }),
+                      },
                     ]}
                   />
                 </td>

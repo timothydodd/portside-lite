@@ -207,7 +207,7 @@ pub fn run() {
             commands::open_backup_folder,
             commands::copy_to_cluster,
             commands::set_workload_disabled,
-            commands::delete_workload,
+            commands::delete_object,
             commands::test_notification,
             commands::check_all_now,
             commands::set_monitoring_paused,

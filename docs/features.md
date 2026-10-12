@@ -24,10 +24,13 @@ back.
 ## Actions
 
 - Restart (delete) a pod; rollout-restart, scale or delete a workload; cordon or uncordon a node.
+- Delete a Service, Ingress, autoscaler, ConfigMap, Secret or ServiceAccount from its row menu. The
+  dialog lists what still uses it (workloads, Ingress routes, an open port-forward). The `default`
+  ServiceAccount and the `kubernetes` Service can't be deleted: the cluster would recreate them.
 - **Scale to 0** remembers the replica count in an annotation on the object, so **Start** brings the
   same count back.
-- **Delete** asks you to type the name and offers a YAML backup first. Every destructive action asks
-  before running.
+- **Delete** asks you to type the name and offers a YAML backup first, whatever the kind. Every
+  destructive action asks before running.
 - View YAML and events for any object.
 
 ## YAML: edit, export, copy, import

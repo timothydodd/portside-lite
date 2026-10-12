@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { AlertOctagon, CheckCircle2, Download, Info, Power, PowerOff, Trash2, X } from "lucide-react";
-import { deleteWorkload, restoreWorkload, scaleTo, stopWorkload, useDeleteDialog, useScaleDialog } from "../lib/actions";
+import { AlertOctagon, AlertTriangle, CheckCircle2, Download, Info, Power, PowerOff, Trash2, X } from "lucide-react";
+import { deleteObject, restoreWorkload, scaleTo, stopWorkload, useDeleteDialog, useScaleDialog } from "../lib/actions";
 import * as ipc from "../lib/ipc";
 import { saveYamlFile } from "../lib/files";
 import { errorMessage } from "../lib/format";
@@ -80,7 +80,26 @@ export function ScaleDialog() {
   );
 }
 
-/** Delete a workload after typing its name, with an export-first escape hatch. */
+const WORKLOAD_KINDS = ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"];
+
+/** What goes with the object, in plain words, for the delete dialog. */
+function deleteEffect(kind: string): string {
+  if (WORKLOAD_KINDS.includes(kind)) return " and its pods";
+  switch (kind) {
+    case "Service":
+      return ", so nothing routes to its pods any more (the pods keep running)";
+    case "Ingress":
+      return ", so its hosts and paths stop routing into the cluster";
+    case "HorizontalPodAutoscaler":
+      return ", so its target keeps whatever replica count it has now";
+    case "ServiceAccount":
+      return ", and the cluster stops issuing tokens for it";
+    default:
+      return "";
+  }
+}
+
+/** Delete an object after typing its name, with an export-first escape hatch. */
 export function DeleteDialog() {
   const { target, close } = useDeleteDialog();
   const [typed, setTyped] = useState("");
@@ -106,8 +125,17 @@ export function DeleteDialog() {
     <Modal title={`Delete ${target.kind} ${target.name}?`} onClose={close}>
       <div className="flex flex-col gap-3 text-sm">
         <p className="text-content-secondary">
-          This removes <b className="text-content">{ns}/{target.name}</b> and its pods from the cluster. It can't be undone.
+          This removes <b className="text-content">{ns}/{target.name}</b> from the cluster{deleteEffect(target.kind)}. It can't be undone.
         </p>
+        {target.dependents && target.dependents.length > 0 && (
+          <div className="flex items-start gap-2 rounded-md bg-muted px-3 py-2 text-xs text-content-secondary">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warning" />
+            <span className="min-w-0 break-words">
+              Still used by <b className="text-content">{target.dependents.join(", ")}</b>
+              {target.kind === "Service" ? ", which will route to nothing." : WORKLOAD_KINDS.includes(target.kind) ? "." : ", which can't start new pods without it."}
+            </span>
+          </div>
+        )}
         <div className="flex items-center justify-between gap-3 rounded-md bg-muted px-3 py-2 text-xs text-content-secondary">
           {exported ? (
             <span className="min-w-0 break-all">Backed up to {exported}</span>
@@ -134,7 +162,7 @@ export function DeleteDialog() {
             disabled={typed !== target.name}
             onClick={() => {
               close();
-              void deleteWorkload(target);
+              void deleteObject(target);
             }}
           >
             <Trash2 size={14} /> Delete

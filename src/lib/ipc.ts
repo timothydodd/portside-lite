@@ -142,8 +142,9 @@ export const copyToCluster = (
   invoke<CopyResult[]>("copy_to_cluster", { kind, namespace, name, extras, targetConnectionId, targetNamespace, dryRun });
 export const setWorkloadDisabled = (kind: string, namespace: string, name: string, disabled: boolean) =>
   invoke<number>("set_workload_disabled", { kind, namespace, name, disabled });
-export const deleteWorkload = (kind: string, namespace: string, name: string) =>
-  invoke<void>("delete_workload", { kind, namespace, name });
+/** Remove a workload, Service, Ingress, HPA, ConfigMap, Secret or ServiceAccount. */
+export const deleteObject = (kind: string, namespace: string, name: string) =>
+  invoke<void>("delete_object", { kind, namespace, name });
 
 // --- service mode ---
 

@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "portside-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "portside-kube"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "futures",
  "http",
@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "portside-lite"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "portside-core",
  "portside-kube",
@@ -3764,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "portside-monitor"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "futures",
@@ -3778,14 +3778,14 @@ dependencies = [
 
 [[package]]
 name = "portside-secrets"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "portside-store"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "portside-core",
  "portside-secrets",

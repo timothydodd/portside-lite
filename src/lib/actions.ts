@@ -15,6 +15,8 @@ export interface ActionTarget {
   replicas?: number;
   /** Count remembered by "Scale to 0", offered as Restore. */
   remembered?: number | null;
+  /** What else depends on this object; shown as a warning in the delete dialog. */
+  dependents?: string[];
 }
 
 export const ACTION_LABELS: Record<ActionKind, string> = {
@@ -131,8 +133,8 @@ export async function restoreWorkload(t: ActionTarget) {
   });
 }
 
-export async function deleteWorkload(t: ActionTarget) {
-  await attempt(`Deleted ${t.kind} ${t.name}`, () => ipc.deleteWorkload(t.kind, t.namespace ?? "", t.name));
+export async function deleteObject(t: ActionTarget) {
+  await attempt(`Deleted ${t.kind} ${t.name}`, () => ipc.deleteObject(t.kind, t.namespace ?? "", t.name));
 }
 
 /** Delete a PersistentVolumeClaim nothing uses (the backend re-checks). */

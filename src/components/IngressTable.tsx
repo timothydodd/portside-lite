@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import { AlertTriangle, FileCode2, Lock } from "lucide-react";
+import { AlertTriangle, FileCode2, Lock, Trash2 } from "lucide-react";
 import { fmtAge } from "../lib/format";
 import type { IngressInfo, IngressRoute } from "../lib/types";
 import { useNavStore } from "../stores/nav";
-import { EmptyState } from "./ui";
+import { ActionMenu, EmptyState } from "./ui";
+import { useDeleteDialog } from "../lib/actions";
 
 function backend(r: IngressRoute): string {
   if (r.service) return `${r.service}${r.port ? `:${r.port}` : ""}`;
@@ -82,9 +83,18 @@ export default function IngressTable(p: { ingresses: IngressInfo[]; namespace: s
               <td className="mono align-top text-content-secondary">{i.address.join(", ") || "—"}</td>
               <td className="align-top text-right text-xs text-content-muted">{fmtAge(i.createdMs, now)}</td>
               <td className="align-top whitespace-nowrap text-right">
-                <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: "Ingress", namespace: i.namespace, name: i.name })}>
-                  <FileCode2 size={14} />
-                </button>
+                <ActionMenu
+                  label={`Actions for ${i.name}`}
+                  items={[
+                    { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => openEditor({ kind: "Ingress", namespace: i.namespace, name: i.name }) },
+                    {
+                      label: "Delete Ingress…",
+                      icon: <Trash2 size={14} />,
+                      danger: true,
+                      onSelect: () => useDeleteDialog.getState().open({ kind: "Ingress", namespace: i.namespace, name: i.name }),
+                    },
+                  ]}
+                />
               </td>
             </tr>
           ))}

@@ -548,9 +548,9 @@ pub async fn set_workload_disabled(
 }
 
 #[tauri::command]
-pub async fn delete_workload(state: State<'_, AppState>, kind: String, namespace: String, name: String) -> CmdResult<()> {
+pub async fn delete_object(state: State<'_, AppState>, kind: String, namespace: String, name: String) -> CmdResult<()> {
     let cc = state.monitor.client().await?;
-    portside_kube::actions::delete_workload(&cc.client, &kind, &namespace, &name).await.map_err(err)?;
+    portside_kube::actions::delete_object(&cc.client, &kind, &namespace, &name).await.map_err(err)?;
     state.monitor.refresh_now();
     Ok(())
 }

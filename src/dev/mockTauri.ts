@@ -564,7 +564,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
     { kind: a.kind, name: a.name, outcome: "created", message: null },
   ],
   set_workload_disabled: (a) => (a.disabled ? 0 : 3),
-  delete_workload: () => null,
+  delete_object: () => null,
   test_notification: () => null,
   check_all_now: () => null,
   set_monitoring_paused: (a) => {

@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import { FileCode2 } from "lucide-react";
+import { FileCode2, Trash2 } from "lucide-react";
 import { fmtAge, fmtAgo } from "../lib/format";
 import type { AutoscalerInfo } from "../lib/types";
 import { useNavStore } from "../stores/nav";
-import { EmptyState, StatusPill } from "./ui";
+import { ActionMenu, EmptyState, StatusPill } from "./ui";
+import { useDeleteDialog } from "../lib/actions";
 
 function state(h: AutoscalerInfo): { label: string; tone: "good" | "warning" | "critical" | "muted"; rank: number } {
   if (h.problem) return { label: "Can't scale", tone: "critical", rank: 0 };
@@ -63,9 +64,19 @@ export default function AutoscalerTable({ rows }: { rows: AutoscalerInfo[] }) {
                 <td className="text-right text-xs text-content-muted">{fmtAgo(h.lastScaleMs)}</td>
                 <td className="text-right text-xs text-content-muted">{fmtAge(h.createdMs, now)}</td>
                 <td className="whitespace-nowrap text-right">
-                  <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: "HorizontalPodAutoscaler", namespace: h.namespace, name: h.name })}>
-                    <FileCode2 size={14} />
-                  </button>
+                  <ActionMenu
+                    label={`Actions for ${h.name}`}
+                    items={[
+                      { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => openEditor({ kind: "HorizontalPodAutoscaler", namespace: h.namespace, name: h.name }) },
+                      {
+                        label: "Delete autoscaler…",
+                        icon: <Trash2 size={14} />,
+                        danger: true,
+                        title: `${h.targetKind} ${h.targetName} keeps its current replica count`,
+                        onSelect: () => useDeleteDialog.getState().open({ kind: "HorizontalPodAutoscaler", namespace: h.namespace, name: h.name }),
+                      },
+                    ]}
+                  />
                 </td>
               </tr>
             );

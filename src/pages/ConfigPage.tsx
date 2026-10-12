@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Download, FileCode2, KeyRound, Lock } from "lucide-react";
+import { Download, FileCode2, KeyRound, Lock, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { saveYamlFile } from "../lib/files";
 import { errorMessage, fmtAge, fmtBytes } from "../lib/format";
@@ -8,7 +8,8 @@ import RegistryCredentialDialog from "../components/RegistryCredentialDialog";
 import RegistryTable from "../components/RegistryTable";
 import ServiceAccountTable, { isSystemAccount } from "../components/ServiceAccountTable";
 import SnapshotGate from "../components/SnapshotGate";
-import { EmptyState, NamespaceSelect, PageHeader, SearchInput } from "../components/ui";
+import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput } from "../components/ui";
+import { useDeleteDialog } from "../lib/actions";
 import { useNavStore } from "../stores/nav";
 import { toast } from "../stores/toast";
 
@@ -169,12 +170,19 @@ function ConfigTable(p: {
                   </td>
                   <td className="text-right text-xs text-content-muted">{fmtAge(c.createdMs, now)}</td>
                   <td className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <button className="btn-quiet" title="Edit YAML" onClick={() => p.openEditor({ kind: c.kind, namespace: c.namespace, name: c.name })}>
-                      <FileCode2 size={14} />
-                    </button>
-                    <button className="btn-quiet" title="Export YAML to a file" onClick={() => void exportOne(c)}>
-                      <Download size={14} />
-                    </button>
+                    <ActionMenu
+                      label={`Actions for ${c.name}`}
+                      items={[
+                        { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => p.openEditor({ kind: c.kind, namespace: c.namespace, name: c.name }) },
+                        { label: "Export YAML", icon: <Download size={14} />, title: "Export YAML to a file", onSelect: () => void exportOne(c) },
+                        {
+                          label: `Delete ${c.kind}…`,
+                          icon: <Trash2 size={14} />,
+                          danger: true,
+                          onSelect: () => useDeleteDialog.getState().open({ kind: c.kind, namespace: c.namespace, name: c.name, dependents: c.usedBy }),
+                        },
+                      ]}
+                    />
                   </td>
                 </tr>
               ))}

@@ -115,11 +115,44 @@ fn remembered_replicas(meta: &kube::api::ObjectMeta) -> Option<i32> {
     meta.annotations.as_ref()?.get(DISABLED_REPLICAS_ANNOTATION)?.parse().ok()
 }
 
-/// `kubectl delete <kind> <name>`: removes the workload and (in the
-/// background) the pods it owns.
-pub async fn delete_workload(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<()> {
-    if !matches!(kind, "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob") {
-        return Err(KubeError::Other(format!("deleting a {kind} isn't supported here")));
+/// Kinds a user may remove from a table row. Pods have their own path
+/// (`delete_pod`), PersistentVolumeClaims go through the files manager, and
+/// cluster-scoped objects (Nodes, PersistentVolumes, StorageClasses) are left
+/// to kubectl on purpose.
+pub const DELETABLE_KINDS: &[&str] = &[
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "Job",
+    "CronJob",
+    "Service",
+    "Ingress",
+    "HorizontalPodAutoscaler",
+    "ConfigMap",
+    "Secret",
+    "ServiceAccount",
+];
+
+/// Why an object can't be removed from the UI, or `None` when it can.
+/// Pure, so the rule is unit-tested here and the UI can show it ahead of time.
+pub fn delete_refusal(kind: &str, namespace: &str, name: &str) -> Option<String> {
+    if !DELETABLE_KINDS.contains(&kind) {
+        return Some(format!("deleting a {kind} isn't supported here"));
+    }
+    match (kind, namespace, name) {
+        ("ServiceAccount", _, "default") => {
+            Some("the default ServiceAccount is recreated by the cluster; delete its bindings or pull secrets instead".into())
+        }
+        ("Service", "default", "kubernetes") => Some("the kubernetes Service is managed by the API server".into()),
+        _ => None,
+    }
+}
+
+/// `kubectl delete <kind> <name>`: removes the object and, for workloads, the
+/// pods it owns (in the background).
+pub async fn delete_object(client: &Client, kind: &str, namespace: &str, name: &str) -> Result<()> {
+    if let Some(why) = delete_refusal(kind, namespace, name) {
+        return Err(KubeError::Other(why));
     }
     let (api, _) = crate::manifests::api_for_kind(client, kind, Some(namespace)).await?;
     api.delete(name, &DeleteParams::background()).await?;
@@ -155,4 +188,25 @@ pub async fn events_for(client: &Client, kind: &str, namespace: Option<&str>, na
     let objs = ClusterObjects { events, ..Default::default() };
     let snap = portside_core::summarize::build_snapshot("", &objs, &Default::default(), 0);
     Ok(snap.events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_refusal;
+
+    #[test]
+    fn deletable_kinds_pass() {
+        for kind in ["Deployment", "Service", "Ingress", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "ServiceAccount"] {
+            assert_eq!(delete_refusal(kind, "apps", "web"), None, "{kind}");
+        }
+    }
+
+    #[test]
+    fn cluster_managed_objects_are_refused() {
+        assert!(delete_refusal("ServiceAccount", "apps", "default").is_some());
+        assert!(delete_refusal("Service", "default", "kubernetes").is_some());
+        assert_eq!(delete_refusal("Service", "apps", "kubernetes"), None);
+        assert!(delete_refusal("Pod", "apps", "web").is_some());
+        assert!(delete_refusal("PersistentVolume", "", "pv-1").is_some());
+    }
 }

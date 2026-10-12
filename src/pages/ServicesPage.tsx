@@ -1,12 +1,13 @@
 import { Fragment, useMemo, useState } from "react";
-import { ArrowRightLeft, FileCode2 } from "lucide-react";
+import { ArrowRightLeft, FileCode2, Trash2 } from "lucide-react";
 import { ForwardsPanel } from "../components/Forwards";
 import { useClusterStore } from "../stores/cluster";
 import { fmtAge } from "../lib/format";
 import type { ServiceInfo, ServicePort } from "../lib/types";
 import IngressTable from "../components/IngressTable";
 import SnapshotGate from "../components/SnapshotGate";
-import { EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
+import { ActionMenu, EmptyState, NamespaceSelect, PageHeader, SearchInput, StatusPill } from "../components/ui";
+import { useDeleteDialog } from "../lib/actions";
 import { useNavStore } from "../stores/nav";
 
 /** Endpoint health: what traffic to this Service would actually hit. */
@@ -119,20 +120,35 @@ function ServicesTable(p: { services: ServiceInfo[]; namespace: string; search: 
                       {(() => {
                         const active = forwards.find((f) => f.namespace === s.namespace && f.service === s.name);
                         const forwardable = s.type !== "ExternalName" && Object.keys(s.selector).length > 0;
+                        const ref = { kind: "Service", namespace: s.namespace, name: s.name };
+                        const dependents = [...s.routes.map((r) => `route ${r}`), ...(active ? [`port-forward localhost:${active.localPort}`] : [])];
                         return (
-                          <button
-                            className={`btn-quiet ${active ? "!text-accent" : ""}`}
-                            disabled={!forwardable}
-                            title={active ? `Forwarded to localhost:${active.localPort}` : forwardable ? "Forward a port to this computer" : "Nothing to forward to (no selector)"}
-                            onClick={() => openForward(s.namespace, s.name)}
-                          >
-                            <ArrowRightLeft size={14} />
-                          </button>
+                          <>
+                            <button
+                              className={`btn-quiet ${active ? "!text-accent" : ""}`}
+                              disabled={!forwardable}
+                              title={active ? `Forwarded to localhost:${active.localPort}` : forwardable ? "Forward a port to this computer" : "Nothing to forward to (no selector)"}
+                              onClick={() => openForward(s.namespace, s.name)}
+                            >
+                              <ArrowRightLeft size={14} />
+                            </button>
+                            <ActionMenu
+                              label={`Actions for ${s.name}`}
+                              items={[
+                                { label: "Edit YAML", icon: <FileCode2 size={14} />, onSelect: () => openEditor(ref) },
+                                {
+                                  label: "Delete Service…",
+                                  icon: <Trash2 size={14} />,
+                                  danger: true,
+                                  disabled: s.namespace === "default" && s.name === "kubernetes",
+                                  title: s.namespace === "default" && s.name === "kubernetes" ? "Managed by the API server" : undefined,
+                                  onSelect: () => useDeleteDialog.getState().open({ ...ref, dependents }),
+                                },
+                              ]}
+                            />
+                          </>
                         );
                       })()}
-                      <button className="btn-quiet" title="Edit YAML" onClick={() => openEditor({ kind: "Service", namespace: s.namespace, name: s.name })}>
-                        <FileCode2 size={14} />
-                      </button>
                     </td>
                   </tr>
                   {open && (
