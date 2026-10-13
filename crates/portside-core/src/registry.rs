@@ -65,6 +65,20 @@ fn username(entry: &Value) -> Option<String> {
     text.split_once(':').map(|(u, _)| u.to_string()).filter(|u| !u.is_empty())
 }
 
+/// Registry hosts a Secret (as JSON, `data` base64-encoded) holds
+/// credentials for; empty for anything that isn't a pull secret.
+pub fn secret_pull_hosts(secret: &Value) -> Vec<String> {
+    let secret_type = secret.get("type").and_then(Value::as_str).unwrap_or_default();
+    let key = match secret_type {
+        DOCKER_CONFIG_JSON => ".dockerconfigjson",
+        DOCKER_CFG => ".dockercfg",
+        _ => return Vec::new(),
+    };
+    let Some(b64) = secret.pointer(&format!("/data/{key}")).and_then(Value::as_str) else { return Vec::new() };
+    let Ok(payload) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else { return Vec::new() };
+    credential_hosts(secret_type, &payload).into_iter().map(|(h, _)| h).collect()
+}
+
 /// What a new pull secret needs.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +179,14 @@ mod tests {
         assert_eq!(credential_hosts(DOCKER_CFG, legacy.as_bytes()), vec![("quay.io".into(), None)]);
         assert!(credential_hosts("Opaque", payload.as_bytes()).is_empty());
         assert!(credential_hosts(DOCKER_CONFIG_JSON, b"not json").is_empty());
+    }
+
+    #[test]
+    fn pull_hosts_read_from_a_secret_object() {
+        let input = RegistryCredentialInput { namespace: "a".into(), name: "s".into(), server: "ghcr.io".into(), username: "u".into(), password: "p".into(), email: None };
+        assert_eq!(secret_pull_hosts(&pull_secret(&input)), vec!["ghcr.io".to_string()]);
+        assert!(secret_pull_hosts(&json!({ "type": "Opaque", "data": { "x": "eQ==" } })).is_empty());
+        assert!(secret_pull_hosts(&json!({ "type": DOCKER_CONFIG_JSON, "data": { ".dockerconfigjson": "!!" } })).is_empty());
     }
 
     #[test]

@@ -446,6 +446,14 @@ const handlers: Record<string, (a: Args) => unknown> = {
   },
   get_status: () => ({ state: "connected", message: null, clusterId: snapshot.clusterId, serverVersion: snapshot.serverVersion, lastPollMs: now - 4000, lastPollDurationMs: 212, lastLogSyncMs: now - 21_000, lastLogSyncLines: 1834, logSyncErrors: 0, paused: settings.monitoringPaused }),
   get_snapshot: () => snapshot,
+  probe_k3s_host: () => ({
+    k3sInstalled: false, k3sVersion: null, k3sRunning: false, kubeconfig: "missing", os: "Ubuntu 24.04.1 LTS", arch: "x86_64",
+    packageManager: "apt", hasCurl: true, hasSystemd: true, sudoOk: true, hostKeyFingerprint: "SHA256:demo",
+  }),
+  install_k3s: () => ({
+    k3sInstalled: true, k3sVersion: "k3s version v1.31.4+k3s1 (demo)", k3sRunning: true, kubeconfig: "readable", os: "Ubuntu 24.04.1 LTS",
+    arch: "x86_64", packageManager: "apt", hasCurl: true, hasSystemd: true, sudoOk: true, hostKeyFingerprint: "SHA256:demo",
+  }),
   test_connection: (a) => {
     const c = a.connection as Settings["connections"][number]["connection"];
     return { serverVersion: "v1.33.4+k3s1", hostKeyFingerprint: c.mode === "ssh" ? c.hostKeyFingerprint : null };
@@ -503,6 +511,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
     { kind: "Ingress", name: "web", reason: `routes to Service ${a.name}`, exists: true, sensitive: false, defaultSelected: true },
     { kind: "RoleBinding", name: `${a.name}-config`, reason: `grants ServiceAccount ${a.name} its permissions`, exists: true, sensitive: false, defaultSelected: true, via: `ServiceAccount/${a.name}` },
     { kind: "Role", name: "config-reader", reason: `granted by RoleBinding ${a.name}-config`, exists: true, sensitive: false, defaultSelected: true, via: `ServiceAccount/${a.name}` },
+    { kind: "Secret", name: "web-tls", reason: "TLS certificate of Ingress web (contains the private key)", exists: true, sensitive: true, defaultSelected: false, via: null },
+    { kind: "PodDisruptionBudget", name: `${a.name}-pdb`, reason: "limits disruption of its pods", exists: true, sensitive: false, defaultSelected: true, via: null },
   ],
   save_backup: (a) => {
     const spec = a.spec as { namespace: string; name: string; claimSize: string };
@@ -560,10 +570,21 @@ const handlers: Record<string, (a: Args) => unknown> = {
       ...(a.keepBinary as string[]).map((key) => ({ key, value: null, binary: true, size: 2412 })),
     ].sort((x, y) => x.key.localeCompare(y.key)),
   }),
-  copy_to_cluster: (a) => [
-    ...(a.extras as { kind: string; name: string }[]).map((e) => ({ ...e, outcome: "created", message: null })),
-    { kind: a.kind, name: a.name, outcome: "created", message: null },
-  ],
+  copy_to_cluster: (args) => {
+    const a = args.request as { kind: string; name: string; extras: { kind: string; name: string }[]; targetNamespace: string; dataClaims: string[] };
+    return {
+    results: [
+      ...a.extras.map((e) => ({ ...e, outcome: "created", message: null })),
+      ...a.dataClaims.map((c) => ({ kind: "Volume files", name: c, outcome: "copied", message: "12.4 MB transferred" })),
+      { kind: a.kind, name: a.name, outcome: "created", message: null },
+      { kind: "ServiceAccount", name: "default", outcome: "updated", message: "pull secret ghcr added to its imagePullSecrets" },
+    ],
+    warnings: [
+      `Deployment ${a.name} needs Secret ${a.name}-secrets, which isn't being copied and doesn't exist in ${a.targetNamespace}: its pods won't start. Tick it under Bring along.`,
+      `PersistentVolumeClaim ${a.name}-data uses StorageClass fast, which the target doesn't have: the claim will stay Pending.`,
+    ],
+    };
+  },
   set_workload_disabled: (a) => (a.disabled ? 0 : 3),
   delete_object: () => null,
   test_notification: () => null,

@@ -455,6 +455,42 @@ export type SshAuth =
   | { kind: "key"; privateKeyPath: string; passphrase: string | null }
   | { kind: "password"; password: string };
 
+/** What an SSH host has (before offering to install k3s). */
+export interface HostProbe {
+  k3sInstalled: boolean;
+  k3sVersion: string | null;
+  k3sRunning: boolean;
+  /** readable | root-only | missing */
+  kubeconfig: string;
+  os: string;
+  arch: string;
+  packageManager: string | null;
+  hasCurl: boolean;
+  hasSystemd: boolean;
+  sudoOk: boolean;
+  hostKeyFingerprint: string | null;
+}
+
+export interface K3sInstallOptions {
+  updateSystem: boolean;
+  channel: "stable" | "latest";
+  version: string | null;
+  kubeconfigReadable: boolean;
+  traefik: boolean;
+  servicelb: boolean;
+  localStorage: boolean;
+  metricsServer: boolean;
+  secretsEncryption: boolean;
+  clusterInit: boolean;
+  tlsSan: string | null;
+  nodeName: string | null;
+}
+
+export interface K3sInstallLog {
+  jobId: string;
+  text: string;
+}
+
 /** Stands in for a saved password/passphrase in settings from the backend (mirrors `SAVED_SECRET`). */
 export const SAVED_SECRET = "__portside_saved__";
 
@@ -666,8 +702,30 @@ export interface ConfigData {
 }
 
 export interface CopyResult extends ObjectRef {
-  outcome: "created" | "updated" | "error";
+  /** `copied` is for "Volume files" rows (a claim's files). */
+  outcome: "created" | "updated" | "unchanged" | "copied" | "error";
   message: string | null;
+}
+
+export interface CopyRequest {
+  kind: string;
+  namespace: string;
+  name: string;
+  extras: ObjectRef[];
+  targetConnectionId: string;
+  targetNamespace: string;
+  /** Claims (among `extras`) whose files go too, through this PC. */
+  dataClaims: string[];
+  /** For `files:progress` events and cancelTransfer. */
+  transferId: string;
+  dryRun: boolean;
+}
+
+export interface CopyOutcome {
+  /** One row per object in apply order; a last row for the target ServiceAccount when pull secrets were attached. */
+  results: CopyResult[];
+  /** What the target still has to provide: unticked config, missing classes, pull secrets, nodes. */
+  warnings: string[];
 }
 
 /** A workload the editor / copy dialog acts on. */

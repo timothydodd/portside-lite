@@ -21,7 +21,7 @@ pub async fn plan(client: &Client, kind: &str, namespace: &str, name: &str) -> R
     for k in WORKLOAD_KINDS {
         workloads.extend(list_values(client, k, namespace).await?);
     }
-    Ok(plan_items(&target, rel, &workloads, &ns.services, &ns.ingresses, &ns.role_bindings))
+    Ok(plan_items(&target, rel, &workloads, &ns))
 }
 
 /// Delete objects from one namespace, users before what they use (Ingresses

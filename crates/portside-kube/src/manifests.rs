@@ -9,13 +9,14 @@ use portside_core::manifest::{
     apply_order, clean_for_edit, clean_for_export, references, related_objects, retarget_namespace, service_account_name,
     ManifestDoc, NamespaceObjects, ObjectRef, RelatedRef,
 };
+pub use crate::copy::{copy_objects, CopyOutcome};
 use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{KubeError, Result};
 
-const FIELD_MANAGER: &str = "portside-lite";
+pub(crate) const FIELD_MANAGER: &str = "portside-lite";
 
 fn other(msg: impl Into<String>) -> KubeError {
     KubeError::Other(msg.into())
@@ -27,7 +28,8 @@ fn group_version(kind: &str) -> Result<(&'static str, &'static str)> {
     Ok(match kind {
         "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" => ("apps", "v1"),
         "Job" | "CronJob" => ("batch", "v1"),
-        "Ingress" | "IngressClass" => ("networking.k8s.io", "v1"),
+        "Ingress" | "IngressClass" | "NetworkPolicy" => ("networking.k8s.io", "v1"),
+        "PodDisruptionBudget" => ("policy", "v1"),
         "PriorityClass" => ("scheduling.k8s.io", "v1"),
         "CustomResourceDefinition" => ("apiextensions.k8s.io", "v1"),
         "HelmChart" | "HelmChartConfig" => ("helm.cattle.io", "v1"),
@@ -50,13 +52,21 @@ async fn resolve(client: &Client, gvk: &GroupVersionKind) -> Result<(ApiResource
 }
 
 pub(crate) async fn api_for_kind(client: &Client, kind: &str, namespace: Option<&str>) -> Result<(Api<DynamicObject>, ApiResource)> {
+    let (api, ar, _) = api_for_kind_scoped(client, kind, namespace).await?;
+    Ok((api, ar))
+}
+
+/// Like [`api_for_kind`], also saying whether the kind is namespaced (the
+/// namespace is ignored for cluster-scoped kinds).
+pub(crate) async fn api_for_kind_scoped(client: &Client, kind: &str, namespace: Option<&str>) -> Result<(Api<DynamicObject>, ApiResource, Scope)> {
     let (g, v) = group_version(kind)?;
     let (ar, caps) = resolve(client, &GroupVersionKind::gvk(g, v, kind)).await?;
-    let api = match (caps.scope, namespace) {
+    let scope = caps.scope;
+    let api = match (&scope, namespace) {
         (Scope::Namespaced, Some(ns)) => Api::namespaced_with(client.clone(), ns, &ar),
         _ => Api::all_with(client.clone(), &ar),
     };
-    Ok((api, ar))
+    Ok((api, ar, scope))
 }
 
 /// JSON form of one object, with apiVersion/kind filled in (list/get
@@ -223,7 +233,24 @@ pub(crate) async fn namespace_objects(client: &Client, namespace: &str) -> Resul
         list_values(client, "RoleBinding", namespace),
         list_values(client, "Role", namespace),
     )?;
-    Ok(NamespaceObjects { services, ingresses, hpas, service_accounts, role_bindings, roles })
+    let (pod_disruption_budgets, network_policies, cluster_roles, cluster_role_bindings) = futures::try_join!(
+        list_values(client, "PodDisruptionBudget", namespace),
+        list_values(client, "NetworkPolicy", namespace),
+        list_values(client, "ClusterRole", namespace),
+        list_values(client, "ClusterRoleBinding", namespace),
+    )?;
+    Ok(NamespaceObjects {
+        services,
+        ingresses,
+        hpas,
+        service_accounts,
+        role_bindings,
+        roles,
+        pod_disruption_budgets,
+        network_policies,
+        cluster_roles,
+        cluster_role_bindings,
+    })
 }
 
 /// One workload plus the chosen related objects as a single multi-document
@@ -343,56 +370,7 @@ pub struct CopyResult {
     pub message: Option<String>,
 }
 
-/// Copy objects from one cluster/namespace to another with server-side apply
-/// (creates, or updates what exists). Each item is cleaned of server fields
-/// and retargeted to `target_namespace`. The namespace is created if missing.
-pub async fn copy_objects(
-    src: &Client,
-    dst: &Client,
-    source_namespace: &str,
-    items: &[ObjectRef],
-    target_namespace: &str,
-    dry_run: bool,
-) -> Result<Vec<CopyResult>> {
-    let mut namespaces = HashMap::new();
-    let ns_ready = namespace_ready(dst, target_namespace, dry_run, &mut namespaces).await?;
-    let mut pp = PatchParams::apply(FIELD_MANAGER).force();
-    pp.dry_run = dry_run;
-
-    let mut ordered: Vec<&ObjectRef> = items.iter().collect();
-    ordered.sort_by_key(|r| apply_order(&r.kind));
-    let mut results = Vec::with_capacity(items.len());
-    for item in ordered {
-        if !ns_ready {
-            // Dry run into a namespace that doesn't exist yet: the server can't
-            // validate objects inside it, so report the plan instead of failing.
-            results.push(CopyResult {
-                kind: item.kind.clone(),
-                name: item.name.clone(),
-                outcome: "created".into(),
-                message: Some(pending_namespace_note(target_namespace)),
-            });
-            continue;
-        }
-        let result = async {
-            let mut v = get_value(src, &item.kind, Some(source_namespace), &item.name).await?;
-            clean_for_export(&mut v);
-            retarget_namespace(&mut v, target_namespace);
-            let (api, _) = api_for_kind(dst, &item.kind, Some(target_namespace)).await?;
-            let existed = api.get_opt(&item.name).await?.is_some();
-            api.patch(&item.name, &pp, &Patch::Apply(&v)).await?;
-            Ok::<_, KubeError>(if existed { "updated" } else { "created" })
-        }
-        .await;
-        results.push(match result {
-            Ok(outcome) => CopyResult { kind: item.kind.clone(), name: item.name.clone(), outcome: outcome.into(), message: None },
-            Err(e) => CopyResult { kind: item.kind.clone(), name: item.name.clone(), outcome: "error".into(), message: Some(e.to_string()) },
-        });
-    }
-    Ok(results)
-}
-
-fn pending_namespace_note(namespace: &str) -> String {
+pub(crate) fn pending_namespace_note(namespace: &str) -> String {
     format!("namespace {namespace} will be created too; the server can't validate objects inside it until it exists")
 }
 
@@ -400,7 +378,7 @@ fn pending_namespace_note(namespace: &str) -> String {
 /// the server, `false` on a dry run where the namespace would first have to
 /// be created (a dry run can't create it, so objects in it can't be
 /// validated). Results are cached per call site in `seen`.
-async fn namespace_ready(client: &Client, namespace: &str, dry_run: bool, seen: &mut HashMap<String, bool>) -> Result<bool> {
+pub(crate) async fn namespace_ready(client: &Client, namespace: &str, dry_run: bool, seen: &mut HashMap<String, bool>) -> Result<bool> {
     use k8s_openapi::api::core::v1::Namespace;
     if let Some(ready) = seen.get(namespace) {
         return Ok(*ready);

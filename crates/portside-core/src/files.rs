@@ -150,6 +150,14 @@ fi
 mv -f -- "$tmp" "$dst" || exit 1
 trap - EXIT"#;
 
+/// `$1` = where to extract (the archive's paths are relative to it), `$2`
+/// = the member to take (nothing outside it is written), `$3` = exact byte
+/// count on stdin. The owners and modes in the archive are kept, so copied
+/// files belong to whoever owned them on the source.
+const UNTAR: &str = r#"cd -- "$1" || exit 1
+set -o pipefail
+head -c "$3" | tar xzf - "$2""#;
+
 /// `$1` = base folder, then folders relative to it (parents first). New
 /// folders take the base folder's owner.
 const MKDIRS: &str = r#"base="$1"; shift
@@ -194,6 +202,14 @@ pub fn tar_command(rel: &str) -> Vec<String> {
 
 pub fn put_command(rel: &str, size: u64) -> Vec<String> {
     script(PUT, &[&abs(rel), &size.to_string()])
+}
+
+/// Extract an archive made by [`tar_command`] for the same relative path,
+/// `size` bytes on stdin, over what's there (same names replaced, the rest kept).
+pub fn untar_command(rel: &str, size: u64) -> Vec<String> {
+    let full = abs(rel);
+    let (parent, name) = full.rsplit_once('/').expect("absolute path");
+    script(UNTAR, &[if parent.is_empty() { "/" } else { parent }, &format!("./{name}"), &size.to_string()])
 }
 
 pub fn mkdirs_command(base_rel: &str, dirs: &[String]) -> Vec<String> {
@@ -491,6 +507,8 @@ mod tests {
         assert_eq!(&c[3..], &["sh", "/data/dir/it's here.txt", "12"]);
         assert_eq!(&tar_command("")[4..], &["/", "data"]);
         assert_eq!(&tar_command("logs/old")[4..], &["/data/logs", "old"]);
+        assert_eq!(&untar_command("", 1234)[4..], &["/", "./data", "1234"], "extracts the same member tar_command packs");
+        assert_eq!(&untar_command("logs/old", 9)[4..], &["/data/logs", "./old", "9"]);
         assert_eq!(&mkdirs_command("up", &["a".into(), "a/b".into()])[4..], &["/data/up", "a", "a/b"]);
     }
 

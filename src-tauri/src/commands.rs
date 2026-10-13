@@ -71,6 +71,25 @@ pub async fn test_connection(state: State<'_, AppState>, mut connection: Connect
     Ok(TestResult { server_version, host_key_fingerprint })
 }
 
+/// What's on an SSH host: k3s (installed, running), OS, sudo. Used before
+/// offering to install k3s.
+#[tauri::command]
+pub async fn probe_k3s_host(state: State<'_, AppState>, connection: Connection, profile_id: Option<String>) -> CmdResult<portside_core::k3s::HostProbe> {
+    state.monitor.probe_k3s(connection, profile_id.as_deref()).await
+}
+
+/// Install k3s on an SSH host; output streams as `k3s:install` events.
+#[tauri::command]
+pub async fn install_k3s(
+    state: State<'_, AppState>,
+    connection: Connection,
+    profile_id: Option<String>,
+    options: portside_core::k3s::K3sInstallOptions,
+    job_id: String,
+) -> CmdResult<portside_core::k3s::HostProbe> {
+    state.monitor.install_k3s(connection, profile_id.as_deref(), options, job_id).await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KubeContexts {
@@ -502,31 +521,11 @@ pub fn open_backup_folder(state: State<'_, AppState>, profile_id: Option<String>
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
 }
 
-/// Copy a workload (plus chosen related objects) from the active cluster
-/// to any saved connection, into `target_namespace`.
+/// Copy a workload (plus chosen related objects and the files of chosen
+/// claims) from the active cluster to any saved connection.
 #[tauri::command]
-pub async fn copy_to_cluster(
-    state: State<'_, AppState>,
-    kind: String,
-    namespace: String,
-    name: String,
-    extras: Vec<portside_core::manifest::ObjectRef>,
-    target_connection_id: String,
-    target_namespace: String,
-    dry_run: bool,
-) -> CmdResult<Vec<portside_kube::manifests::CopyResult>> {
-    let target_namespace = target_namespace.trim().to_string();
-    if target_namespace.is_empty() {
-        return Err("Pick a target namespace.".into());
-    }
-    let src = state.monitor.client().await?;
-    let dst = state.monitor.connect_profile(&target_connection_id).await?;
-    // Dependencies first so the workload's pods find them on start.
-    let mut items = extras;
-    items.push(portside_core::manifest::ObjectRef { kind, name });
-    portside_kube::manifests::copy_objects(&src.client, &dst.client, &namespace, &items, &target_namespace, dry_run)
-        .await
-        .map_err(err)
+pub async fn copy_to_cluster(state: State<'_, AppState>, request: portside_monitor::copydata::CopyRequest) -> CmdResult<portside_kube::copy::CopyOutcome> {
+    state.monitor.copy_workload(request).await
 }
 
 /// Scale to 0 remembering the replica count (`disabled = true`), or restore

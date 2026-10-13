@@ -375,6 +375,21 @@ pub async fn upload_file(
     run_from(client, namespace, pod, core_files::put_command(dest_rel, size), &mut f, size, progress).await
 }
 
+/// Extract a local `.tar.gz` made by [`download`] of the same relative
+/// folder into the volume, over what's there.
+pub async fn extract_archive(
+    client: &Client,
+    namespace: &str,
+    pod: &str,
+    local: &Path,
+    rel: &str,
+    size: u64,
+    progress: &(dyn Fn(u64) + Send + Sync),
+) -> Result<()> {
+    let mut f = tokio::fs::File::open(local).await.map_err(|e| other(format!("Couldn't open {}: {e}", local.display())))?;
+    run_from(client, namespace, pod, core_files::untar_command(rel, size), &mut f, size, progress).await
+}
+
 /// Download a file, or a folder as a .tar.gz, to `dest`. A failed or
 /// cancelled download leaves nothing behind (the caller removes `dest` if the
 /// future is dropped).

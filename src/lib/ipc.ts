@@ -7,7 +7,10 @@ import type {
   ClusterSnapshot,
   ConfigData,
   Connection,
-  CopyResult,
+  CopyOutcome,
+  CopyRequest,
+  HostProbe,
+  K3sInstallOptions,
   ErrorPattern,
   FileListing,
   FileSession,
@@ -45,6 +48,10 @@ export const saveSettings = (settings: Settings) => invoke<Settings>("save_setti
 /** `profileId`: the saved profile being edited, so passwords left as saved can be used. */
 export const testConnection = (connection: Connection, profileId: string | null) =>
   invoke<{ serverVersion: string; hostKeyFingerprint: string | null }>("test_connection", { connection, profileId });
+export const probeK3sHost = (connection: Connection, profileId: string | null) =>
+  invoke<HostProbe>("probe_k3s_host", { connection, profileId });
+export const installK3s = (connection: Connection, profileId: string | null, options: K3sInstallOptions, jobId: string) =>
+  invoke<HostProbe>("install_k3s", { connection, profileId, options, jobId });
 export const listKubeContexts = (kubeconfigPath: string | null) =>
   invoke<{ contexts: string[]; current: string | null }>("list_kube_contexts", { kubeconfigPath });
 export const getStatus = () => invoke<Status>("get_status");
@@ -130,16 +137,7 @@ export const localBackupStatus = () => invoke<LocalBackupStatus>("local_backup_s
 export const localBackupArchives = () => invoke<LocalArchives[]>("local_backup_archives");
 export const runLocalBackups = (jobs: BackupJob[]) => invoke<void>("run_local_backups", { jobs });
 export const openBackupFolder = (profileId: string | null) => invoke<void>("open_backup_folder", { profileId });
-export const copyToCluster = (
-  kind: string,
-  namespace: string,
-  name: string,
-  extras: ObjectRef[],
-  targetConnectionId: string,
-  targetNamespace: string,
-  dryRun: boolean,
-) =>
-  invoke<CopyResult[]>("copy_to_cluster", { kind, namespace, name, extras, targetConnectionId, targetNamespace, dryRun });
+export const copyToCluster = (request: CopyRequest) => invoke<CopyOutcome>("copy_to_cluster", { request });
 export const setWorkloadDisabled = (kind: string, namespace: string, name: string, disabled: boolean) =>
   invoke<number>("set_workload_disabled", { kind, namespace, name, disabled });
 /** Remove a workload, Service, Ingress, HPA, ConfigMap, Secret or ServiceAccount. */

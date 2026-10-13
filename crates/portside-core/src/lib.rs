@@ -7,6 +7,7 @@ pub mod archive;
 pub mod backup;
 pub mod files;
 pub mod issues;
+pub mod k3s;
 pub mod logline;
 pub mod manifest;
 pub mod models;

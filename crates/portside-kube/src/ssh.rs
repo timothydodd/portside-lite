@@ -137,6 +137,27 @@ impl Session {
         }
     }
 
+    /// Like [`exec`](Self::exec), but hands every piece of output (stdout
+    /// and stderr, as it arrives) to `on_output`, for long-running commands
+    /// whose progress the user watches. Returns the exit status.
+    pub async fn exec_stream(&self, command: &str, stdin: Option<&str>, on_output: &mut (dyn FnMut(&str) + Send)) -> Result<u32> {
+        let mut channel = self.handle.channel_open_session().await.map_err(err)?;
+        channel.exec(true, command).await.map_err(err)?;
+        if let Some(input) = stdin {
+            channel.data(format!("{input}\n").as_bytes()).await.map_err(err)?;
+        }
+        channel.eof().await.map_err(err)?;
+        let mut code = None;
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => on_output(&String::from_utf8_lossy(&data)),
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                _ => {}
+            }
+        }
+        code.ok_or_else(|| err(format!("the connection closed while `{command}` was running")))
+    }
+
     /// Listen on 127.0.0.1:<random> and forward each connection to
     /// `remote_host:remote_port` as seen from the SSH server.
     pub async fn tunnel(self, remote_host: String, remote_port: u16) -> Result<Tunnel> {

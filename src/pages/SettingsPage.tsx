@@ -5,8 +5,9 @@ import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage, fmtAgo, fmtBytes, fmtCount } from "../lib/format";
 import { describeCron } from "../lib/schedule";
-import { SAVED_SECRET, type Connection, type ConnectionProfile, type Settings, type SshConnection, type StorageStats } from "../lib/types";
+import { SAVED_SECRET, type Connection, type ConnectionProfile, type HostProbe, type Settings, type SshConnection, type StorageStats } from "../lib/types";
 import { ModeIcon, connectionSummary } from "../components/ClusterSwitcher";
+import K3sInstall from "../components/K3sInstall";
 import SchedulePicker from "../components/SchedulePicker";
 import { PageHeader, Spinner } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
@@ -244,11 +245,27 @@ function ConnectionEditor({ profileId, connection, onChange }: { profileId: stri
   const mode = connection.mode;
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  /** The SSH host answered but has no k3s: offer to install it. */
+  const [missing, setMissing] = useState<HostProbe | null>(null);
 
   const test = async () => {
     setTesting(true);
     setResult(null);
+    setMissing(null);
     try {
+      if (connection.mode === "ssh") {
+        // SSH works? Then is k3s there at all, before the kubeconfig read can fail confusingly.
+        const probe = await ipc.probeK3sHost(connection, profileId);
+        if (!probe.k3sInstalled) {
+          setMissing(probe);
+          setResult({ ok: false, text: `SSH works, but k3s isn't installed on ${connection.host} (${probe.os}${probe.arch ? `, ${probe.arch}` : ""}).` });
+          return;
+        }
+        if (!probe.k3sRunning && probe.hasSystemd) {
+          setResult({ ok: false, text: `${probe.k3sVersion ?? "k3s"} is installed on ${connection.host} but the k3s service isn't active. Start it: sudo systemctl start k3s` });
+          return;
+        }
+      }
       const r = await ipc.testConnection(connection, profileId);
       setResult({ ok: true, text: `Connected — Kubernetes ${r.serverVersion}${r.hostKeyFingerprint ? ` · host key ${r.hostKeyFingerprint}` : ""}` });
     } catch (e) {
@@ -264,6 +281,7 @@ function ConnectionEditor({ profileId, connection, onChange }: { profileId: stri
       onClick={() => {
         if (m === mode) return;
         setResult(null);
+        setMissing(null);
         if (m === "local") onChange({ mode: "local", kubeconfigPath: null, context: null });
         else onChange({ mode: "ssh", ...DEFAULT_SSH });
       }}
@@ -297,6 +315,19 @@ function ConnectionEditor({ profileId, connection, onChange }: { profileId: stri
           </span>
         )}
       </div>
+      {missing && connection.mode === "ssh" && (
+        <K3sInstall
+          connection={connection}
+          profileId={profileId}
+          probe={missing}
+          onInstalled={(after) => {
+            setMissing(null);
+            if (after.hostKeyFingerprint && !connection.hostKeyFingerprint) onChange({ ...connection, hostKeyFingerprint: after.hostKeyFingerprint });
+            toast.success(`${after.k3sVersion ?? "k3s"} installed on ${connection.host}`);
+            void test();
+          }}
+        />
+      )}
     </>
   );
 }

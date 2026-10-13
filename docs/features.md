@@ -39,14 +39,26 @@ back.
   `kubectl edit`: if the object changed on the cluster in the meantime, the save is refused.
 - **Export** clean, re-appliable YAML. Choose a single workload, a whole kind, or a namespace. A
   single workload can bring the objects it needs, and you pick which: its ConfigMaps, Secrets,
-  ServiceAccount (with that account's pull secrets, RoleBindings and Roles), PVCs, the Services
-  that select its pods, the Ingresses that route to those Services, and HPAs. A ServiceAccount can
+  ServiceAccount (with that account's pull secrets, RoleBindings, Roles and any ClusterRoles or
+  ClusterRoleBindings they rely on), PVCs, the Services that select its pods (a StatefulSet's
+  headless Service too), the Ingresses that route to those Services and their TLS Secrets, HPAs,
+  PodDisruptionBudgets and NetworkPolicies that select its pods. A ServiceAccount can
   be exported or copied the same way, with its pull secrets and permissions. PVCs are picked by default. Tick **Include the files** to also save each
   volume's contents next to the YAML as `<claim>.data.tar.gz`, copied through the same helper pod
   as the file browser. Stop the app first if you want a consistent copy.
 - **Copy** a workload or ServiceAccount to any saved cluster or namespace, optionally with the objects
-  it references. The target namespace is created if needed, and copied RoleBindings point at the
-  copied account.
+  it references (same list as Export). The target namespace is created if needed, and copied
+  RoleBindings and ClusterRoleBindings point at the copied account. A pull secret the pods get
+  through an account that isn't copied (usually `default`) is attached to the target's account of
+  that name. **Dry run** first: besides what would be created or updated, it lists what the target
+  would still be missing — config or Secrets left unticked, a StorageClass, IngressClass,
+  PriorityClass or ClusterRole the target doesn't have, images whose pull secret isn't coming
+  along, and nodes the pods are pinned to. When a PVC is among the copied objects, tick **Also copy
+  the files** to carry its contents too: they stream through this PC (a read-only helper pod on the
+  source, a read-write one on the target) after the claim is created and before the workload starts,
+  so nothing on the target has the claim mounted meanwhile. A copy of the workload already running
+  on the target is scaled to 0 for the write and comes back with the workload. Same-named files are
+  replaced, the rest kept. Stop the source app first for a consistent copy.
 - **Import** one or many YAML files, or pasted YAML (multi-document and `kind: List` included), into
   any saved cluster. Objects are applied in dependency order, with a dry-run preview first.
 

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::manifest::{binding_accounts, ingress_backend_services, references, selector_matches, service_account_name, ObjectRef, RelatedRef};
+use crate::manifest::{binding_accounts, ingress_backend_services, references, selector_matches, service_account_name, NamespaceObjects, ObjectRef, RelatedRef};
 
 /// Bumped when the on-disk layout of an archive changes.
 pub const ARCHIVE_FORMAT: u32 = 1;
@@ -157,19 +157,16 @@ fn kind_name(v: &Value) -> (String, String) {
 /// need it. `workloads` are the namespace's Deployments, StatefulSets,
 /// DaemonSets, Jobs and CronJobs (the target among them is skipped, as are
 /// objects with an owner, e.g. a CronJob's Jobs, whose owner speaks for
-/// them). `services`, `ingresses` and `role_bindings` are the namespace's
-/// objects of those kinds. An Ingress counts as shared when it also routes to
-/// Services that aren't the target's. What came through the ServiceAccount
-/// (`via`) is shared with every workload running as it; a RoleBinding also
-/// with whoever else it binds, a Role with bindings outside the archive.
-pub fn plan_items(
-    target: &Value,
-    related: Vec<RelatedRef>,
-    workloads: &[Value],
-    services: &[Value],
-    ingresses: &[Value],
-    role_bindings: &[Value],
-) -> Vec<ArchivePlanItem> {
+/// them). `ns` holds the namespace's Services, Ingresses, RoleBindings,
+/// PodDisruptionBudgets and NetworkPolicies. An Ingress counts as shared when
+/// it also routes to Services that aren't the target's; a budget or policy
+/// when its selector matches another workload's pods. What came through the
+/// ServiceAccount (`via`) is shared with every workload running as it; a
+/// RoleBinding also with whoever else it binds, a Role with bindings outside
+/// the archive. Cluster-wide roles and bindings are always marked as
+/// possibly used elsewhere, since other namespaces aren't looked at.
+pub fn plan_items(target: &Value, related: Vec<RelatedRef>, workloads: &[Value], ns: &NamespaceObjects) -> Vec<ArchivePlanItem> {
+    let (services, ingresses, role_bindings) = (&ns.services, &ns.ingresses, &ns.role_bindings);
     let target_id = kind_name(target);
     let others: Vec<&Value> = workloads
         .iter()
@@ -203,6 +200,16 @@ pub fn plan_items(
                 }
                 "Ingress" => named(ingresses, &r.name).map(|i| ingress_foreign_backends(&i, &ours)).unwrap_or_default(),
                 "HorizontalPodAutoscaler" => Vec::new(),
+                "PodDisruptionBudget" | "NetworkPolicy" => {
+                    let (list, pointer) = if r.kind == "PodDisruptionBudget" {
+                        (&ns.pod_disruption_budgets, "/spec/selector/matchLabels")
+                    } else {
+                        (&ns.network_policies, "/spec/podSelector/matchLabels")
+                    };
+                    let selector = named(list, &r.name).and_then(|o| o.pointer(pointer).and_then(Value::as_object).cloned()).unwrap_or_default();
+                    others.iter().filter(|w| selector_matches(&selector, &pod_template_labels(w))).map(|w| label(w)).collect()
+                }
+                "ClusterRole" | "ClusterRoleBinding" => vec!["anything bound to it in other namespaces (cluster-wide)".into()],
                 "RoleBinding" => {
                     let mine = r.via.as_deref().and_then(|v| v.strip_prefix("ServiceAccount/"));
                     let mut users = Vec::new();
@@ -346,8 +353,16 @@ mod tests {
             rel("Ingress", "web-ing"),
             rel("Ingress", "site"),
             rel("HorizontalPodAutoscaler", "web"),
+            rel("PodDisruptionBudget", "web-pdb"),
+            rel("ClusterRole", "metrics"),
         ];
-        let plan = plan_items(&target, related, &workloads, &services, &ingresses, &[]);
+        let ns = NamespaceObjects {
+            services,
+            ingresses,
+            pod_disruption_budgets: vec![json!({ "metadata": { "name": "web-pdb" }, "spec": { "selector": { "matchLabels": { "app": "web" } } } })],
+            ..Default::default()
+        };
+        let plan = plan_items(&target, related, &workloads, &ns);
         let used: Vec<(String, Vec<String>)> = plan.into_iter().map(|p| (format!("{}/{}", p.related.kind, p.related.name), p.used_by)).collect();
         assert_eq!(
             used,
@@ -358,6 +373,8 @@ mod tests {
                 ("Ingress/web-ing".into(), vec![]),
                 ("Ingress/site".into(), vec!["Service/blog".to_string()]),
                 ("HorizontalPodAutoscaler/web".into(), vec![]),
+                ("PodDisruptionBudget/web-pdb".into(), vec!["StatefulSet/web-canary".to_string()]),
+                ("ClusterRole/metrics".into(), vec!["anything bound to it in other namespaces (cluster-wide)".to_string()]),
             ]
         );
     }
@@ -378,7 +395,7 @@ mod tests {
         ];
         let via = |kind: &str, name: &str| RelatedRef { via: Some("ServiceAccount/web-sa".into()), ..rel(kind, name) };
         let related = vec![via("Secret", "quay"), via("RoleBinding", "web-rb"), via("Role", "reader")];
-        let plan = plan_items(&target, related, &workloads, &[], &[], &role_bindings);
+        let plan = plan_items(&target, related, &workloads, &NamespaceObjects { role_bindings, ..Default::default() });
         let used: Vec<(String, Vec<String>)> = plan.into_iter().map(|p| (format!("{}/{}", p.related.kind, p.related.name), p.used_by)).collect();
         assert_eq!(
             used,

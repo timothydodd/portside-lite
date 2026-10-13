@@ -89,7 +89,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// Calls `emit` at most every [`PROGRESS_EVERY`], plus on the first call.
-fn throttled(emit: impl Fn(u64) + Send + Sync) -> impl Fn(u64) + Send + Sync {
+pub(crate) fn throttled(emit: impl Fn(u64) + Send + Sync) -> impl Fn(u64) + Send + Sync {
     let last = StdMutex::new(None::<Instant>);
     move |n| {
         let mut l = last.lock().unwrap();
@@ -306,7 +306,7 @@ impl Monitor {
         kube_files::delete_claim(&client.client, namespace, claim).await.map_err(err)
     }
 
-    async fn session(&self, id: u64) -> Result<(Arc<ClusterClient>, FileSession), String> {
+    pub(crate) async fn session(&self, id: u64) -> Result<(Arc<ClusterClient>, FileSession), String> {
         let sessions = self.file_sessions.lock().await;
         let e = sessions.get(&id).ok_or("That file browser was closed. Reopen the volume.")?;
         Ok((Arc::clone(&e.client), e.info.clone()))
@@ -373,7 +373,7 @@ impl Monitor {
             .map_err(err)
     }
 
-    fn progress_fn(&self, transfer_id: &str) -> impl Fn(&str, u64, Option<u64>) + Send + Sync + use<> {
+    pub(crate) fn progress_fn(&self, transfer_id: &str) -> impl Fn(&str, u64, Option<u64>) + Send + Sync + use<> {
         let sink = Arc::clone(&self.sink);
         let id = transfer_id.to_string();
         move |label: &str, done, total| {
@@ -382,7 +382,7 @@ impl Monitor {
     }
 
     /// Run `fut` until it finishes or the user cancels `transfer_id`.
-    async fn cancellable<T>(&self, transfer_id: &str, fut: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    pub(crate) async fn cancellable<T>(&self, transfer_id: &str, fut: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
         let (tx, mut rx) = watch::channel(false);
         self.transfers.lock().unwrap().insert(transfer_id.to_string(), tx);
         let res = tokio::select! {

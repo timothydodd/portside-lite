@@ -22,7 +22,16 @@ Use this when the API server isn't reachable from your machine but SSH is.
    the command per connection.
 3. It forwards the API server port through the SSH session.
 
-Nothing is installed on the node.
+Nothing is installed on the node, unless you ask for it (below).
+
+**No k3s yet?** **Test connection** first checks the host over SSH. If k3s isn't installed it says
+so and offers to install it: optionally update the OS packages first (apt, dnf, yum, zypper or
+apk), then run the official installer (`curl -sfL https://get.k3s.io | sh -s - server …`) with
+the options you tick, each explained in the form: kubeconfig readable without sudo, Traefik,
+ServiceLB, local-path storage, the metrics server, Secrets encryption, embedded etcd, a pinned
+version and an extra TLS name. The installer's output streams into the form; when the node is
+Ready the connection test runs again. The login needs working sudo (passwordless, or the sudo
+password in the form). To remove it later, run `/usr/local/bin/k3s-uninstall.sh` on the server.
 
 **Host key.** The server's host key is pinned on first connect. If it changes later, the connection
 is blocked until you clear the pinned key in Settings.

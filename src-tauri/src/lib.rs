@@ -55,6 +55,9 @@ impl EventSink for TauriSink {
     fn file_progress(&self, progress: &portside_monitor::files::FileProgress) {
         let _ = self.0.emit("files:progress", progress);
     }
+    fn k3s_install_log(&self, log: &portside_monitor::k3s::K3sInstallLog) {
+        let _ = self.0.emit("k3s:install", log);
+    }
 }
 
 pub struct AppState {
@@ -164,6 +167,8 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::test_connection,
+            commands::probe_k3s_host,
+            commands::install_k3s,
             commands::list_kube_contexts,
             commands::get_status,
             commands::get_snapshot,

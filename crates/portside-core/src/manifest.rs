@@ -62,6 +62,18 @@ fn strip_cluster_assigned(obj: &mut Value) {
                         }
                     }
                 }
+                // The server fills these in from the cluster's own IP families;
+                // a dual-stack choice (PreferDualStack/RequireDualStack) is kept.
+                if spec.get("ipFamilyPolicy").and_then(Value::as_str).is_none_or(|p| p == "SingleStack") {
+                    spec.remove("ipFamilies");
+                    spec.remove("ipFamilyPolicy");
+                }
+            }
+        }
+        "Pod" => {
+            // Assigned by the scheduler; elsewhere there is no such node.
+            if let Some(Value::Object(spec)) = obj.get_mut("spec") {
+                spec.remove("nodeName");
             }
         }
         "PersistentVolumeClaim" => {
@@ -143,19 +155,28 @@ pub fn clean_for_edit(obj: &mut Value) {
 
 /// Point a (cleaned) namespaced object at another namespace. A RoleBinding's
 /// ServiceAccount subjects in the old namespace move with it, so the copy
-/// grants the copied account rather than the original.
+/// grants the copied account rather than the original. Cluster-scoped
+/// objects must not come here (see [`retarget_binding_subjects`]).
 pub fn retarget_namespace(obj: &mut Value, namespace: &str) {
     let old = obj.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string);
     if let Some(Value::Object(m)) = obj.get_mut("metadata") {
         m.insert("namespace".into(), Value::String(namespace.into()));
     }
-    if obj.get("kind").and_then(Value::as_str) != Some("RoleBinding") {
+    if let Some(old) = old {
+        retarget_binding_subjects(obj, &old, namespace);
+    }
+}
+
+/// Move a (Cluster)RoleBinding's ServiceAccount subjects from `from` to
+/// `to`, so a copied binding grants the copied account. A subject without a
+/// namespace means the binding's own, which a RoleBinding carries along.
+pub fn retarget_binding_subjects(obj: &mut Value, from: &str, to: &str) {
+    if from == to || !matches!(obj.get("kind").and_then(Value::as_str), Some("RoleBinding" | "ClusterRoleBinding")) {
         return;
     }
-    let Some(old) = old.filter(|o| o != namespace) else { return };
     for s in obj.get_mut("subjects").and_then(Value::as_array_mut).into_iter().flatten() {
-        if s.get("kind").and_then(Value::as_str) == Some("ServiceAccount") && s.get("namespace").and_then(Value::as_str) == Some(old.as_str()) {
-            s["namespace"] = Value::String(namespace.into());
+        if s.get("kind").and_then(Value::as_str) == Some("ServiceAccount") && s.get("namespace").and_then(Value::as_str) == Some(from) {
+            s["namespace"] = Value::String(to.into());
         }
     }
 }
@@ -231,6 +252,7 @@ pub fn references(obj: &Value) -> Vec<ObjectRef> {
         add("ConfigMap", vol.get("configMap").and_then(|c| s(c, "name")).as_deref());
         add("Secret", vol.get("secret").and_then(|c| s(c, "secretName")).as_deref());
         add("PersistentVolumeClaim", vol.get("persistentVolumeClaim").and_then(|c| s(c, "claimName")).as_deref());
+        add("Secret", vol.get("csi").and_then(|c| c.get("nodePublishSecretRef")).and_then(|r| s(r, "name")).as_deref());
         for src in vol.get("projected").and_then(|p| p.get("sources")).and_then(Value::as_array).into_iter().flatten() {
             add("ConfigMap", src.get("configMap").and_then(|c| s(c, "name")).as_deref());
             add("Secret", src.get("secret").and_then(|c| s(c, "name")).as_deref());
@@ -283,6 +305,16 @@ pub struct NamespaceObjects {
     pub service_accounts: Vec<Value>,
     pub role_bindings: Vec<Value>,
     pub roles: Vec<Value>,
+    pub pod_disruption_budgets: Vec<Value>,
+    pub network_policies: Vec<Value>,
+    /// Cluster-wide: every ClusterRole and ClusterRoleBinding.
+    pub cluster_roles: Vec<Value>,
+    pub cluster_role_bindings: Vec<Value>,
+}
+
+/// ClusterRoles every cluster ships with; a copy target has them already.
+pub fn builtin_cluster_role(name: &str) -> bool {
+    name.starts_with("system:") || matches!(name, "cluster-admin" | "admin" | "edit" | "view")
 }
 
 fn name_at(v: &Value) -> Option<&str> {
@@ -354,6 +386,7 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
         out.push(RelatedRef { exists: exists(&kind, &name), kind, name, reason: reason.into(), sensitive, default_selected, via: None });
     }
 
+    let have = |out: &[RelatedRef], kind: &str, name: &str| out.iter().any(|r| r.kind == kind && r.name == name);
     // What the account brings. For a workload that's whatever its pods run as.
     let account = if is_account { name_at(workload).map(str::to_string) } else { service_account_name(workload) };
     if let Some(account) = account {
@@ -362,7 +395,6 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
         // The default account isn't exported with a workload; its grants are
         // offered but left unticked, since the target has its own default.
         let pick = is_account || account != "default";
-        let have = |out: &[RelatedRef], kind: &str, name: &str| out.iter().any(|r| r.kind == kind && r.name == name);
         if !is_account {
             let sa = ns.service_accounts.iter().find(|s| name_at(s) == Some(account.as_str()));
             for secret in sa.map(account_pull_secrets).unwrap_or_default() {
@@ -380,6 +412,8 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
             }
         }
         let mut roles: Vec<(String, String)> = Vec::new();
+        // (ClusterRole, granted by) for roles the target cluster won't have.
+        let mut cluster_roles: Vec<(String, String)> = Vec::new();
         for rb in ns.role_bindings.iter().filter(|rb| binds_account(rb, namespace, &account)) {
             let Some(rb_name) = name_at(rb) else { continue };
             out.push(RelatedRef {
@@ -391,10 +425,10 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
                 default_selected: pick,
                 via: via.clone(),
             });
-            if rb.pointer("/roleRef/kind").and_then(Value::as_str) == Some("Role") {
-                if let Some(role) = rb.pointer("/roleRef/name").and_then(Value::as_str) {
-                    roles.push((role.into(), rb_name.into()));
-                }
+            match (rb.pointer("/roleRef/kind").and_then(Value::as_str), rb.pointer("/roleRef/name").and_then(Value::as_str)) {
+                (Some("Role"), Some(role)) => roles.push((role.into(), rb_name.into())),
+                (Some("ClusterRole"), Some(role)) if !builtin_cluster_role(role) => cluster_roles.push((role.into(), format!("RoleBinding {rb_name}"))),
+                _ => {}
             }
         }
         for (role, rb_name) in roles {
@@ -406,6 +440,39 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
                     reason: format!("granted by RoleBinding {rb_name}"),
                     sensitive: false,
                     default_selected: pick,
+                    via: via.clone(),
+                });
+            }
+        }
+        // Cluster-wide grants are offered but never pre-ticked: a
+        // ClusterRoleBinding's subjects are replaced on the target, and the
+        // roles may be shared with other namespaces.
+        for crb in ns.cluster_role_bindings.iter().filter(|crb| binding_accounts(crb).iter().any(|(ns, n)| ns.as_deref() == Some(namespace) && n == &account)) {
+            let Some(crb_name) = name_at(crb) else { continue };
+            out.push(RelatedRef {
+                kind: "ClusterRoleBinding".into(),
+                name: crb_name.into(),
+                reason: format!("grants ServiceAccount {account} cluster-wide permissions; its subjects on the target are replaced"),
+                exists: true,
+                sensitive: false,
+                default_selected: false,
+                via: via.clone(),
+            });
+            if let (Some("ClusterRole"), Some(role)) = (crb.pointer("/roleRef/kind").and_then(Value::as_str), crb.pointer("/roleRef/name").and_then(Value::as_str)) {
+                if !builtin_cluster_role(role) {
+                    cluster_roles.push((role.into(), format!("ClusterRoleBinding {crb_name}")));
+                }
+            }
+        }
+        for (role, by) in cluster_roles {
+            if !have(&out, "ClusterRole", &role) {
+                out.push(RelatedRef {
+                    exists: ns.cluster_roles.iter().any(|r| name_at(r) == Some(role.as_str())),
+                    kind: "ClusterRole".into(),
+                    name: role,
+                    reason: format!("granted by {by}; cluster-wide, so it may be shared with other namespaces"),
+                    sensitive: false,
+                    default_selected: false,
                     via: via.clone(),
                 });
             }
@@ -434,20 +501,68 @@ pub fn related_objects(workload: &Value, ns: &NamespaceObjects, exists: impl Fn(
             }
         }
     }
+    // A StatefulSet's governing (headless) Service may have no selector.
+    if let Some(headless) = workload.pointer("/spec/serviceName").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+        if !service_names.iter().any(|n| n == headless) {
+            service_names.push(headless.to_string());
+            out.push(RelatedRef {
+                kind: "Service".into(),
+                name: headless.into(),
+                reason: "its headless Service (pods get their DNS names from it)".into(),
+                exists: ns.services.iter().any(|s| name_at(s) == Some(headless)),
+                sensitive: false,
+                default_selected: true,
+                via: None,
+            });
+        }
+    }
 
     for ing in &ns.ingresses {
         let backends = ingress_backend_services(ing);
         if let Some(hit) = backends.iter().find(|b| service_names.contains(b)) {
-            if let Some(n) = name_at(ing) {
-                out.push(RelatedRef {
-                    kind: "Ingress".into(),
-                    name: n.into(),
-                    reason: format!("routes to Service {hit}"),
-                    exists: true,
-                    sensitive: false,
-                    default_selected: true,
-                    via: None,
-                });
+            let Some(n) = name_at(ing) else { continue };
+            out.push(RelatedRef {
+                kind: "Ingress".into(),
+                name: n.into(),
+                reason: format!("routes to Service {hit}"),
+                exists: true,
+                sensitive: false,
+                default_selected: true,
+                via: None,
+            });
+            for secret in ingress_tls_secrets(ing) {
+                if !have(&out, "Secret", &secret) {
+                    out.push(RelatedRef {
+                        exists: exists("Secret", &secret),
+                        kind: "Secret".into(),
+                        reason: format!("TLS certificate of Ingress {n} (contains the private key)"),
+                        name: secret,
+                        sensitive: true,
+                        default_selected: false,
+                        via: None,
+                    });
+                }
+            }
+        }
+    }
+
+    for (kind, list, pointer, reason) in [
+        ("PodDisruptionBudget", &ns.pod_disruption_budgets, "/spec/selector/matchLabels", "limits disruption of its pods"),
+        ("NetworkPolicy", &ns.network_policies, "/spec/podSelector/matchLabels", "applies to its pods"),
+    ] {
+        for obj in list {
+            if selector_matches(&labels_at(obj, pointer), &labels) {
+                if let Some(n) = name_at(obj) {
+                    out.push(RelatedRef {
+                        kind: kind.into(),
+                        name: n.into(),
+                        reason: reason.into(),
+                        exists: true,
+                        sensitive: false,
+                        default_selected: true,
+                        via: None,
+                    });
+                }
             }
         }
     }
@@ -487,6 +602,19 @@ pub fn ingress_backend_services(ingress: &Value) -> Vec<String> {
         }
     }
     out
+}
+
+/// Secrets an Ingress serves TLS with.
+pub fn ingress_tls_secrets(ingress: &Value) -> Vec<String> {
+    ingress
+        .pointer("/spec/tls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.get("secretName").and_then(Value::as_str))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// A file (or pasted text) handed to import.
@@ -587,8 +715,161 @@ pub fn apply_order(kind: &str) -> u8 {
         "ConfigMap" | "Secret" | "PersistentVolume" | "PersistentVolumeClaim" | "StorageClass" => 3,
         "Service" => 4,
         "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job" | "CronJob" | "Pod" => 5,
-        _ => 6, // Ingress, HPA, NetworkPolicy, CRs…
+        _ => 6, // Ingress, HPA, PodDisruptionBudget, NetworkPolicy, CRs…
     }
+}
+
+
+/// Something the copied set relies on that isn't in the set, so the target
+/// cluster has to provide it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Need {
+    /// Namespaced (ConfigMap, Secret, Service…) or cluster-scoped
+    /// (StorageClass, IngressClass, PriorityClass, ClusterRole). A
+    /// StorageClass named "" means "the default class".
+    pub kind: String,
+    pub name: String,
+    /// Who needs it, e.g. "Deployment web".
+    pub by: String,
+}
+
+/// An image a pod spec in the set pulls, with the pull secrets it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageNeed {
+    pub image: String,
+    pub host: String,
+    pub by: String,
+    /// `imagePullSecrets` named in the pod spec itself.
+    pub pull_secrets: Vec<String>,
+    /// The ServiceAccount the pods run as (its pull secrets count too).
+    pub account: String,
+}
+
+/// What a set of objects to copy still needs from the target.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CopyNeeds {
+    pub objects: Vec<Need>,
+    pub images: Vec<ImageNeed>,
+    /// Pod templates pinned to a node by name: (node, by).
+    pub node_names: Vec<(String, String)>,
+    /// Pod templates with a `nodeSelector`: (selector, by).
+    pub node_selectors: Vec<(serde_json::Map<String, Value>, String)>,
+}
+
+pub const CLUSTER_SCOPED_NEEDS: &[&str] = &["StorageClass", "IngressClass", "PriorityClass", "ClusterRole"];
+
+/// Registries anyone can pull from without credentials.
+pub fn public_registry(host: &str) -> bool {
+    matches!(
+        host,
+        "docker.io" | "ghcr.io" | "quay.io" | "gcr.io" | "registry.k8s.io" | "k8s.gcr.io" | "mcr.microsoft.com" | "public.ecr.aws" | "docker.elastic.co"
+    )
+}
+
+/// Walk the set and collect what it references by name but doesn't contain:
+/// pod-spec references, Role/ClusterRole of bindings, Ingress backends, TLS
+/// secrets and classes, storage classes of claims and claim templates,
+/// priority classes, images, and node pinning. Order is stable (sorted).
+pub fn copy_needs(set: &[Value]) -> CopyNeeds {
+    let kind_name = |v: &Value| {
+        (
+            v.get("kind").and_then(Value::as_str).unwrap_or_default().to_string(),
+            name_at(v).unwrap_or_default().to_string(),
+        )
+    };
+    let included: std::collections::BTreeSet<(String, String)> = set.iter().map(kind_name).collect();
+    let mut objects = std::collections::BTreeSet::new();
+    let mut needs = CopyNeeds::default();
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).filter(|n| !n.is_empty()).map(str::to_string);
+
+    for obj in set {
+        let (kind, name) = kind_name(obj);
+        let by = format!("{kind} {name}");
+        let mut need = |k: &str, n: &str| {
+            if !included.contains(&(k.to_string(), n.to_string())) {
+                objects.insert(Need { kind: k.into(), name: n.into(), by: by.clone() });
+            }
+        };
+        // Pull secrets are judged per image below (a missing one doesn't stop
+        // the pod, it fails the pull); a ServiceAccount's references are all
+        // pull secrets.
+        let pod_pull_secrets: Vec<String> = pod_spec(obj)
+            .and_then(|ps| ps.get("imagePullSecrets"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| s(r, "name"))
+            .collect();
+        if kind != "ServiceAccount" {
+            for r in references(obj) {
+                if !(r.kind == "Secret" && pod_pull_secrets.contains(&r.name)) {
+                    need(&r.kind, &r.name);
+                }
+            }
+        }
+        match kind.as_str() {
+            "RoleBinding" | "ClusterRoleBinding" => match (obj.pointer("/roleRef/kind").and_then(Value::as_str), obj.pointer("/roleRef/name").and_then(Value::as_str)) {
+                (Some("Role"), Some(role)) => need("Role", role),
+                (Some("ClusterRole"), Some(role)) if !builtin_cluster_role(role) => need("ClusterRole", role),
+                _ => {}
+            },
+            "Ingress" => {
+                for svc in ingress_backend_services(obj) {
+                    need("Service", &svc);
+                }
+                for secret in ingress_tls_secrets(obj) {
+                    need("Secret", &secret);
+                }
+                if let Some(class) = obj.pointer("/spec/ingressClassName").and_then(Value::as_str).filter(|c| !c.is_empty()) {
+                    need("IngressClass", class);
+                }
+            }
+            "PersistentVolumeClaim" => {
+                need("StorageClass", obj.pointer("/spec/storageClassName").and_then(Value::as_str).unwrap_or_default());
+            }
+            "HorizontalPodAutoscaler" => {
+                if let (Some(k), Some(n)) = (
+                    obj.pointer("/spec/scaleTargetRef/kind").and_then(Value::as_str),
+                    obj.pointer("/spec/scaleTargetRef/name").and_then(Value::as_str),
+                ) {
+                    need(k, n);
+                }
+            }
+            "StatefulSet" => {
+                if let Some(svc) = obj.pointer("/spec/serviceName").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+                    need("Service", svc);
+                }
+                for t in obj.pointer("/spec/volumeClaimTemplates").and_then(Value::as_array).into_iter().flatten() {
+                    need("StorageClass", t.pointer("/spec/storageClassName").and_then(Value::as_str).unwrap_or_default());
+                }
+            }
+            _ => {}
+        }
+        let Some(ps) = pod_spec(obj) else { continue };
+        if let Some(pc) = s(ps, "priorityClassName") {
+            need("PriorityClass", &pc);
+        }
+        if let Some(node) = s(ps, "nodeName") {
+            needs.node_names.push((node, by.clone()));
+        }
+        let selector = labels_at(ps, "/nodeSelector");
+        if !selector.is_empty() {
+            needs.node_selectors.push((selector, by.clone()));
+        }
+        let pull_secrets = pod_pull_secrets;
+        let account = s(ps, "serviceAccountName").unwrap_or_else(|| "default".into());
+        let containers = ["containers", "initContainers"].iter().filter_map(|k| ps.get(*k).and_then(Value::as_array)).flatten();
+        for image in containers.filter_map(|c| s(c, "image")) {
+            let (host, _) = crate::registry::split_image(&image);
+            if needs.images.iter().any(|i| i.image == image && i.by == by) {
+                continue;
+            }
+            needs.images.push(ImageNeed { image, host, by: by.clone(), pull_secrets: pull_secrets.clone(), account: account.clone() });
+        }
+    }
+    // The default account is part of every namespace.
+    needs.objects = objects.into_iter().filter(|n| !(n.kind == "ServiceAccount" && n.name == "default")).collect();
+    needs
 }
 
 #[cfg(test)]
@@ -849,5 +1130,141 @@ mod tests {
         assert_eq!(rb["subjects"][0]["namespace"], "staging");
         assert_eq!(rb["subjects"][1]["namespace"], "tools", "accounts elsewhere stay put");
         assert!(rb["subjects"][2].get("namespace").is_none());
+    }
+
+    #[test]
+    fn related_finds_tls_secrets_headless_services_budgets_policies_and_cluster_roles() {
+        let mut sts = deployment();
+        sts["kind"] = json!("StatefulSet");
+        sts["spec"]["serviceName"] = json!("web-headless");
+        let ns = NamespaceObjects {
+            services: vec![json!({ "metadata": { "name": "web" }, "spec": { "selector": { "app": "web" } } })],
+            ingresses: vec![json!({ "metadata": { "name": "web-ing" },
+                "spec": { "tls": [{ "secretName": "web-tls" }], "rules": [{ "http": { "paths": [{ "backend": { "service": { "name": "web" } } }] } }] } })],
+            pod_disruption_budgets: vec![
+                json!({ "metadata": { "name": "web-pdb" }, "spec": { "selector": { "matchLabels": { "app": "web" } } } }),
+                json!({ "metadata": { "name": "other-pdb" }, "spec": { "selector": { "matchLabels": { "app": "x" } } } }),
+            ],
+            network_policies: vec![
+                json!({ "metadata": { "name": "web-np" }, "spec": { "podSelector": { "matchLabels": { "app": "web" } } } }),
+                json!({ "metadata": { "name": "deny-all" }, "spec": { "podSelector": {} } }),
+            ],
+            service_accounts: vec![json!({ "kind": "ServiceAccount", "metadata": { "name": "web-sa" } })],
+            role_bindings: vec![json!({ "metadata": { "name": "web-view" }, "roleRef": { "kind": "ClusterRole", "name": "view" },
+                "subjects": [{ "kind": "ServiceAccount", "name": "web-sa" }] }),
+                json!({ "metadata": { "name": "web-custom" }, "roleRef": { "kind": "ClusterRole", "name": "metrics-reader" },
+                "subjects": [{ "kind": "ServiceAccount", "name": "web-sa" }] })],
+            cluster_role_bindings: vec![
+                json!({ "metadata": { "name": "web-nodes" }, "roleRef": { "kind": "ClusterRole", "name": "node-reader" },
+                    "subjects": [{ "kind": "ServiceAccount", "name": "web-sa", "namespace": "apps" }] }),
+                json!({ "metadata": { "name": "elsewhere" }, "roleRef": { "kind": "ClusterRole", "name": "node-reader" },
+                    "subjects": [{ "kind": "ServiceAccount", "name": "web-sa", "namespace": "other" }] }),
+            ],
+            cluster_roles: vec![json!({ "metadata": { "name": "node-reader" } })],
+            ..Default::default()
+        };
+        let rel = related_objects(&sts, &ns, |_, n| n != "web-headless");
+        let summary: Vec<String> = rel.iter().map(|r| format!("{}/{}:{}:{}", r.kind, r.name, r.default_selected, r.exists)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                "ConfigMap/web-config:true:true",
+                "PersistentVolumeClaim/web-data:false:true",
+                "Secret/ghcr:false:true",
+                "Secret/web-secrets:false:true",
+                "ServiceAccount/web-sa:true:true",
+                "RoleBinding/web-view:true:true",
+                "RoleBinding/web-custom:true:true",
+                "ClusterRoleBinding/web-nodes:false:true",
+                "ClusterRole/metrics-reader:false:false",
+                "ClusterRole/node-reader:false:true",
+                "Service/web:true:true",
+                "Service/web-headless:true:false",
+                "Ingress/web-ing:true:true",
+                "Secret/web-tls:false:true",
+                "PodDisruptionBudget/web-pdb:true:true",
+                "NetworkPolicy/web-np:true:true",
+            ]
+        );
+        let tls = rel.iter().find(|r| r.name == "web-tls").unwrap();
+        assert!(tls.sensitive && tls.reason.contains("TLS"));
+        assert!(rel.iter().filter(|r| r.kind.starts_with("Cluster")).all(|r| r.via.as_deref() == Some("ServiceAccount/web-sa")));
+    }
+
+    #[test]
+    fn export_strips_ip_families_and_pod_node_name() {
+        let mut svc = json!({ "kind": "Service", "metadata": { "name": "s" }, "spec": { "ipFamilies": ["IPv4"], "ipFamilyPolicy": "SingleStack", "ports": [] } });
+        clean_for_export(&mut svc);
+        assert!(svc["spec"].get("ipFamilies").is_none() && svc["spec"].get("ipFamilyPolicy").is_none());
+        let mut dual = json!({ "kind": "Service", "metadata": { "name": "s" }, "spec": { "ipFamilies": ["IPv4", "IPv6"], "ipFamilyPolicy": "RequireDualStack" } });
+        clean_for_export(&mut dual);
+        assert_eq!(dual["spec"]["ipFamilyPolicy"], "RequireDualStack", "a dual-stack choice is the user's");
+
+        let mut pod = json!({ "kind": "Pod", "metadata": { "name": "p" }, "spec": { "nodeName": "node-a", "containers": [] } });
+        clean_for_export(&mut pod);
+        assert!(pod["spec"].get("nodeName").is_none());
+        let mut dep = deployment();
+        dep["spec"]["template"]["spec"]["nodeName"] = json!("node-a");
+        clean_for_export(&mut dep);
+        assert_eq!(dep["spec"]["template"]["spec"]["nodeName"], "node-a", "a template's nodeName was written by hand");
+    }
+
+    #[test]
+    fn cluster_role_binding_subjects_follow_the_copy() {
+        let mut crb = json!({ "kind": "ClusterRoleBinding", "metadata": { "name": "crb" },
+            "subjects": [
+                { "kind": "ServiceAccount", "name": "web-sa", "namespace": "apps" },
+                { "kind": "ServiceAccount", "name": "ci", "namespace": "tools" },
+            ] });
+        retarget_binding_subjects(&mut crb, "apps", "staging");
+        assert!(crb["metadata"].get("namespace").is_none(), "cluster-scoped objects get no namespace");
+        assert_eq!(crb["subjects"][0]["namespace"], "staging");
+        assert_eq!(crb["subjects"][1]["namespace"], "tools");
+    }
+
+    #[test]
+    fn copy_needs_lists_what_the_target_must_provide() {
+        let mut dep = deployment();
+        dep["spec"]["template"]["spec"]["priorityClassName"] = json!("high");
+        dep["spec"]["template"]["spec"]["nodeSelector"] = json!({ "disk": "ssd" });
+        dep["spec"]["template"]["spec"]["nodeName"] = json!("node-a");
+        let cfg = json!({ "kind": "ConfigMap", "metadata": { "name": "web-config" } });
+        let pvc = json!({ "kind": "PersistentVolumeClaim", "metadata": { "name": "web-data" }, "spec": { "storageClassName": "fast" } });
+        let ing = json!({ "kind": "Ingress", "metadata": { "name": "web-ing" },
+            "spec": { "ingressClassName": "traefik", "tls": [{ "secretName": "web-tls" }],
+                      "rules": [{ "http": { "paths": [{ "backend": { "service": { "name": "web" } } }, { "backend": { "service": { "name": "api" } } }] } }] } });
+        let rb = json!({ "kind": "RoleBinding", "metadata": { "name": "rb" }, "roleRef": { "kind": "ClusterRole", "name": "metrics" } });
+        let rb2 = json!({ "kind": "RoleBinding", "metadata": { "name": "rb2" }, "roleRef": { "kind": "ClusterRole", "name": "view" } });
+        let svc = json!({ "kind": "Service", "metadata": { "name": "web" } });
+        let sts = json!({ "kind": "StatefulSet", "metadata": { "name": "db" },
+            "spec": { "serviceName": "db-headless", "volumeClaimTemplates": [{ "spec": {} }],
+                      "template": { "spec": { "containers": [{ "name": "db", "image": "registry.local:5000/db:1" }], "imagePullSecrets": [{ "name": "local-reg" }] } } } });
+        let needs = copy_needs(&[dep, cfg, pvc, ing, rb, rb2, svc, sts]);
+        let objects: Vec<String> = needs.objects.iter().map(|n| format!("{}/{} by {}", n.kind, n.name, n.by)).collect();
+        assert_eq!(
+            objects,
+            vec![
+                "ClusterRole/metrics by RoleBinding rb",
+                "IngressClass/traefik by Ingress web-ing",
+                "PriorityClass/high by Deployment web",
+                "Secret/web-secrets by Deployment web",
+                "Secret/web-tls by Ingress web-ing",
+                "Service/api by Ingress web-ing",
+                "Service/db-headless by StatefulSet db",
+                "ServiceAccount/web-sa by Deployment web",
+                "StorageClass/ by StatefulSet db",
+                "StorageClass/fast by PersistentVolumeClaim web-data",
+            ]
+        );
+        assert_eq!(needs.node_names, vec![("node-a".to_string(), "Deployment web".to_string())]);
+        assert_eq!(needs.node_selectors.len(), 1);
+        let images: Vec<String> = needs.images.iter().map(|i| format!("{}@{} by {} via {:?}/{}", i.image, i.host, i.by, i.pull_secrets, i.account)).collect();
+        assert_eq!(
+            images,
+            vec![
+                "web:1@docker.io by Deployment web via [\"ghcr\"]/web-sa",
+                "registry.local:5000/db:1@registry.local:5000 by StatefulSet db via [\"local-reg\"]/default",
+            ]
+        );
     }
 }

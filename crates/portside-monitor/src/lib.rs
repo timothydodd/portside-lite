@@ -5,7 +5,9 @@
 
 pub mod backups;
 pub mod files;
+pub mod copydata;
 pub mod forwards;
+pub mod k3s;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -50,6 +52,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn forwards_changed(&self, forwards: &[forwards::ForwardInfo]);
     /// Bytes moved so far in a volume file upload or download.
     fn file_progress(&self, progress: &files::FileProgress);
+    /// A piece of output from a k3s install running over SSH.
+    fn k3s_install_log(&self, log: &k3s::K3sInstallLog);
 }
 
 /// Failed polls of the active cluster before "can't reach" fires (≈45 s at
@@ -945,6 +949,7 @@ mod tests {
         }
         fn forwards_changed(&self, _: &[forwards::ForwardInfo]) {}
         fn file_progress(&self, _: &files::FileProgress) {}
+        fn k3s_install_log(&self, _: &k3s::K3sInstallLog) {}
     }
 
     fn monitor() -> (Arc<Monitor>, Arc<FakeSink>) {
