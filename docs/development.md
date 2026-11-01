@@ -21,6 +21,10 @@ npm install
 npm run tauri dev
 ```
 
+The same two commands work on **macOS** with Xcode Command Line Tools and a Rust toolchain from
+`rustup`. CI builds a `.dmg` on an Apple Silicon runner (`build-mac` in `.github/workflows/build.yml`);
+it is signed and notarized only when the `APPLE_*` secrets listed there exist.
+
 **UI-only work.** `npm run dev` serves the UI at http://localhost:1420 with a mocked backend and
 fixture data (`src/dev/mockTauri.ts`, dev builds only), so it opens in a normal browser.
 

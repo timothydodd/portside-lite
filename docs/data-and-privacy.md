@@ -20,7 +20,9 @@ database is no use elsewhere; after restoring one on another computer or account
 passwords again. Passwords saved by older versions are encrypted the first time this version
 starts. The settings screen never receives a saved password: it shows "Saved" and only sends a new
 one when you type it. Programs running as you can still ask Windows to decrypt them, so key
-authentication remains the better choice.
+authentication remains the better choice. **On macOS these passwords are not yet encrypted**: they
+are stored as typed in the database, which only your user account can read. Prefer key
+authentication there.
 
 **Archives** are written to the archive folder (Settings → Archives; default `archives` in the app
 data folder). They contain the workload's YAML and, if you choose, its stored logs. **Secrets saved

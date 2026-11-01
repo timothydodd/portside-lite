@@ -96,9 +96,99 @@ jobs:
           path: artifacts/licenses/
           if-no-files-found: error
 
+  # macOS (Apple Silicon) disk image. Runs the same checks as the Windows build minus the crate tests.
+  # Signing and notarization switch themselves on once the Apple secrets exist (tags only); until then
+  # the .dmg is unsigned and Gatekeeper needs a right-click > Open on first launch.
+  #   secrets: APPLE_CERTIFICATE (base64 .p12 of a Developer ID Application certificate),
+  #            APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID Application: ..."),
+  #            APPLE_ID, APPLE_PASSWORD (app-specific password), APPLE_TEAM_ID
+  build-mac:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
+    env:
+      SIGN_MAC: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' && startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$INPUT_VERSION"
+          else
+            version="0.0.${{ github.run_number }}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Tag must be vX.Y.Z (got ${GITHUB_REF_NAME})"; exit 1; fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          printf '{ "version": "%s" }\n' "$version" > src-tauri/tauri.version.json
+          echo "Version $version"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Third-party licenses
+        run: |
+          python3 scripts/third-party-notices.py --check --texts artifacts/licenses/THIRD_PARTY_LICENSES.txt
+          cp LICENSE THIRD_PARTY_NOTICES.md artifacts/licenses/
+
+      # Tauri signs and notarizes on its own when these variables are present.
+      - name: Signing credentials
+        if: env.SIGN_MAC == 'true'
+        run: |
+          {
+            echo "APPLE_CERTIFICATE=${{ secrets.APPLE_CERTIFICATE }}"
+            echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build app and disk image
+        run: npx tauri build --bundles dmg --config src-tauri/tauri.version.json
+
+      - name: Collect
+        run: |
+          mkdir -p artifacts
+          dmg=$(ls target/release/bundle/dmg/*.dmg | head -n 1)
+          cp "$dmg" "artifacts/PortsideLite-${APP_VERSION}-macos-arm64.dmg"
+          cp artifacts/licenses/THIRD_PARTY_LICENSES.txt artifacts/
+          ls -l artifacts
+
+      - name: Report signing
+        run: |
+          app=$(ls -d target/release/bundle/macos/*.app | head -n 1)
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E "Authority|Signature|Identifier" || true
+          if [[ "$SIGN_MAC" == "true" ]]; then
+            codesign --verify --deep --strict "$app"
+            spctl -a -vv -t install "$app"
+          fi
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: portside-lite-mac
+          path: artifacts/PortsideLite-*-macos-arm64.dmg
+          if-no-files-found: error
+
   # Tag builds and manual runs: signing (tags only) and the installer.
   release:
-    needs: build
+    needs: [build, build-mac]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
@@ -202,6 +292,12 @@ jobs:
           # Also published on its own, next to the downloads.
           Copy-Item "$stage/THIRD_PARTY_LICENSES.txt" artifacts/
 
+      # The macOS disk image is hashed and published together with the Windows downloads.
+      - uses: actions/download-artifact@v8
+        with:
+          name: portside-lite-mac
+          path: artifacts
+
       # After signing, so the published hashes match the files people download.
       - name: Hash the downloads
         shell: pwsh
@@ -229,6 +325,7 @@ jobs:
           path: |
             artifacts/PortsideLite-Setup-*.exe
             artifacts/PortsideLite-*-portable.zip
+            artifacts/PortsideLite-*-macos-arm64.dmg
             artifacts/SHA256SUMS.txt
             artifacts/THIRD_PARTY_LICENSES.txt
           if-no-files-found: error
@@ -281,6 +378,7 @@ jobs:
           files: |
             artifacts/PortsideLite-Setup-*.exe
             artifacts/PortsideLite-*-portable.zip
+            artifacts/PortsideLite-*-macos-arm64.dmg
             artifacts/SHA256SUMS.txt
             artifacts/THIRD_PARTY_LICENSES.txt
           generate_release_notes: true

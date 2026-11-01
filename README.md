@@ -34,6 +34,11 @@ prompt. Release builds are code-signed; check downloads against `SHA256SUMS.txt`
 Needs Windows 10 1809 or later. The installer adds the Microsoft Edge WebView2 runtime if it's
 missing.
 
+**macOS (Apple Silicon):** download `PortsideLite-<version>-macos-arm64.dmg` and drag the app to
+Applications. Until the Mac builds are signed, macOS blocks the first launch: right-click the app,
+choose **Open**, and confirm. On macOS saved SSH passwords and passphrases are not yet encrypted at
+rest (see [Data and privacy](docs/data-and-privacy.md)).
+
 ## Connect
 
 Open **Settings → Cluster connections** and add either:
