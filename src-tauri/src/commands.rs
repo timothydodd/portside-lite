@@ -680,7 +680,8 @@ use portside_core::archive::{archive_id, ArchiveMeta, ArchivePlanItem, ArchivedO
 use portside_core::manifest::{apply_order, ObjectRef};
 use portside_store::archive as archives;
 
-/// Where archives live: the configured folder, else `archives` in app data.
+/// Where archives live: the configured folder, else `archives` in app data. A folder that isn't
+/// absolute on this OS (a Windows path in settings on a Mac) is ignored, like the backup folder.
 fn archive_dir(state: &State<'_, AppState>) -> std::path::PathBuf {
     state
         .monitor
@@ -688,6 +689,7 @@ fn archive_dir(state: &State<'_, AppState>) -> std::path::PathBuf {
         .archive_dir
         .filter(|d| !d.trim().is_empty())
         .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
         .unwrap_or_else(|| state.data_dir.join("archives"))
 }
 

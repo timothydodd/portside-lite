@@ -35,8 +35,9 @@ Needs Windows 10 1809 or later. The installer adds the Microsoft Edge WebView2 r
 missing.
 
 **macOS (Apple Silicon):** download `PortsideLite-<version>-macos-arm64.dmg` and drag the app to
-Applications. Until the Mac builds are signed, macOS blocks the first launch: right-click the app,
-choose **Open**, and confirm. On macOS saved SSH passwords and passphrases are not yet encrypted at
+Applications. Until the Mac builds are notarized, macOS blocks the first launch: open the app once,
+then go to **System Settings > Privacy & Security** and click **Open Anyway** (or run
+`xattr -dr com.apple.quarantine "/Applications/Portside Lite.app"`). On macOS saved SSH passwords and passphrases are not yet encrypted at
 rest (see [Data and privacy](docs/data-and-privacy.md)).
 
 ## Connect

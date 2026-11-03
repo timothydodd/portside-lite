@@ -170,10 +170,12 @@ fn mb(bytes: u64) -> String {
 }
 
 impl Monitor {
-    /// The configured backup folder, else `backups` in the app's data folder.
+    /// The configured backup folder, else `backups` in the app's data folder. A folder that isn't
+    /// absolute on this OS (settings carried over from Windows, e.g. `H:\Clusters`, on a Mac) is
+    /// ignored: it would resolve against the working directory and scatter backups there.
     pub fn backup_root(&self) -> PathBuf {
         let configured = self.settings.read().unwrap().backup_dir.clone().filter(|d| !d.trim().is_empty());
-        configured.map(PathBuf::from).unwrap_or_else(|| self.data_dir.join("backups"))
+        configured.map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| self.data_dir.join("backups"))
     }
 
     fn cluster_folder(p: &portside_core::ConnectionProfile) -> String {

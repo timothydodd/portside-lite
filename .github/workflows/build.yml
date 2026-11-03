@@ -98,7 +98,9 @@ jobs:
 
   # macOS (Apple Silicon) disk image. Runs the same checks as the Windows build minus the crate tests.
   # Signing and notarization switch themselves on once the Apple secrets exist (tags only); until then
-  # the .dmg is unsigned and Gatekeeper needs a right-click > Open on first launch.
+  # the app is signed ad-hoc (bundle.macOS.signingIdentity "-"): a downloaded copy is blocked until it
+  # is allowed in System Settings > Privacy & Security ("Open Anyway"), or after
+  # "xattr -dr com.apple.quarantine". Without the ad-hoc signature macOS calls it "damaged".
   #   secrets: APPLE_CERTIFICATE (base64 .p12 of a Developer ID Application certificate),
   #            APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID Application: ..."),
   #            APPLE_ID, APPLE_PASSWORD (app-specific password), APPLE_TEAM_ID
@@ -173,9 +175,10 @@ jobs:
       - name: Report signing
         run: |
           app=$(ls -d target/release/bundle/macos/*.app | head -n 1)
-          codesign -dv --verbose=2 "$app" 2>&1 | grep -E "Authority|Signature|Identifier" || true
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E "Authority|Signature|Identifier|Sealed Resources" || true
+          # Always: an unsealed bundle is what Gatekeeper calls "damaged", signed or not.
+          codesign --verify --deep --strict --verbose=2 "$app"
           if [[ "$SIGN_MAC" == "true" ]]; then
-            codesign --verify --deep --strict "$app"
             spctl -a -vv -t install "$app"
           fi
 
