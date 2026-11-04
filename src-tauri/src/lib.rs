@@ -13,8 +13,21 @@ use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "main";
 
+/// macOS: show the Dock icon only while the window is open; tray-only otherwise.
+fn set_dock_visible(app: &AppHandle, visible: bool) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
+}
+
 /// Bring the main window back from the tray (or from behind other windows).
 fn show_main_window(app: &AppHandle) {
+    set_dock_visible(app, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -140,7 +153,9 @@ pub fn run() {
             build_tray(app)?;
             // Windows start hidden (see tauri.conf.json) so `--tray` (used by the
             // installer's "start with Windows" option) never flashes a window.
-            if !std::env::args().any(|a| a == "--tray") {
+            if std::env::args().any(|a| a == "--tray") {
+                set_dock_visible(app.handle(), false);
+            } else {
                 show_main_window(app.handle());
             }
             Ok(())
@@ -152,6 +167,7 @@ pub fn run() {
                 if app.state::<AppState>().monitor.settings().close_to_tray {
                     api.prevent_close();
                     let _ = window.hide();
+                    set_dock_visible(window.app_handle(), false);
                     if !tray_hint_shown.swap(true, Ordering::Relaxed) {
                         let _ = app
                             .notification()
