@@ -179,6 +179,10 @@ rm -rf -- "$1""#;
 const RENAME: &str = r#"[ -e "$2" ] || [ -L "$2" ] && { echo "Something named $(basename -- "$2") already exists there." >&2; exit 1; }
 mv -- "$1" "$2""#;
 
+/// `$1` = file. Prints its SHA-256 (busybox and coreutils both have sha256sum).
+const SHA256: &str = r#"[ -f "$1" ] || { echo "It's gone." >&2; exit 1; }
+sha256sum "$1""#;
+
 fn script(body: &str, args: &[&str]) -> Vec<String> {
     let mut v = vec!["sh".to_string(), "-c".to_string(), body.to_string(), "sh".to_string()];
     v.extend(args.iter().map(|a| a.to_string()));
@@ -217,6 +221,16 @@ pub fn mkdirs_command(base_rel: &str, dirs: &[String]) -> Vec<String> {
     args.extend(dirs.iter().cloned());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     script(MKDIRS, &refs)
+}
+
+pub fn sha256_command(rel: &str) -> Vec<String> {
+    script(SHA256, &[&abs(rel)])
+}
+
+/// The hash from `sha256sum` output (`<hex>  <path>`), lowercased.
+pub fn parse_sha256(out: &str) -> Option<String> {
+    let hash = out.split_whitespace().next()?.to_ascii_lowercase();
+    (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
 }
 
 pub fn remove_command(rel: &str) -> Vec<String> {

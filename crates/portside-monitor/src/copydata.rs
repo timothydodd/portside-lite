@@ -52,7 +52,7 @@ fn row(name: &str, outcome: &str, message: Option<String>) -> CopyResult {
     CopyResult { kind: VOLUME_FILES.into(), name: name.into(), outcome: outcome.into(), message }
 }
 
-fn fmt_bytes(b: u64) -> String {
+pub(crate) fn fmt_bytes(b: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = b as f64;
     let mut i = 0;
@@ -204,7 +204,7 @@ impl Monitor {
         result.map(|()| size)
     }
 
-    async fn write_volume_data(&self, dst: &Arc<ClusterClient>, namespace: &str, claim: &str, archive: &PathBuf, size: u64, transfer_id: &str) -> Result<(), String> {
+    pub(crate) async fn write_volume_data(&self, dst: &Arc<ClusterClient>, namespace: &str, claim: &str, archive: &PathBuf, size: u64, transfer_id: &str) -> Result<(), String> {
         let client = &dst.client;
         let image = self.settings().files_helper_image;
         // Its own owner, so it never takes an open file browser's helper for an orphan.

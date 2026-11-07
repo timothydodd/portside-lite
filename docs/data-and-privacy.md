@@ -33,8 +33,13 @@ in an archive are in plain YAML.**
 **Backups to this PC** go to the backup folder (Settings → Backups to this PC; default `backups` in
 the app data folder), one folder per connection. Copied volume backups are the volume's files as
 they were, in plain `.tar.gz` archives, so they hold whatever the app stored there (database files
-included). Manifest backups are plain YAML **without Secret values**: `secrets-needed.md` lists
-Secret names, types and key names only.
+included). Cluster backups are plain YAML **without Secret values**, unless you set a backup
+passphrase: then Secret values, Helm release values and node credentials (the k3s join token,
+registry logins) are sealed into `secrets.tar.gz.age` with it (age, scrypt), as is the optional
+datastore snapshot. Without the passphrase those files can't be opened, by you either. The
+passphrase itself is saved with the other credentials (see above). Without one,
+`secrets-needed.md` lists Secret names, types and key names only, and node files that hold a
+credential are left out. Node-only images exported from an SSH node are plain image tarballs.
 
 ## On your cluster
 

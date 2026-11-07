@@ -413,9 +413,19 @@ pub fn backup_cronjob(spec: &BackupSpec) -> CronJob {
     serde_json::from_value(cron).expect("backup cronjob is valid")
 }
 
+/// Copied archives can be deleted from a backup's own claim now: no pod has
+/// it mounted (no run going, no file browser writing) and the only thing
+/// that would otherwise count as using it is the backup's own CronJob.
+pub fn archives_removable(users: &crate::files::ClaimUsers, name: &str) -> bool {
+    let own = format!("CronJob {} ", object_name(name));
+    users.pods.is_empty() && users.blockers.iter().all(|b| b.starts_with(&own))
+}
+
 // --- manifest backups (made on this PC) ---------------------------------------------
 
-/// Namespaced kinds a manifest backup saves from every namespace. Never Secrets.
+/// Namespaced kinds a manifest backup saves from every namespace. Secrets
+/// are handled on their own (values only when sealed), as are Endpoints,
+/// EndpointSlices and custom resources (see `cluster_backup`).
 pub const MANIFEST_KINDS: &[&str] = &[
     "Deployment",
     "StatefulSet",
@@ -429,6 +439,10 @@ pub const MANIFEST_KINDS: &[&str] = &[
     "ServiceAccount",
     "Role",
     "RoleBinding",
+    "PodDisruptionBudget",
+    "NetworkPolicy",
+    "LimitRange",
+    "ResourceQuota",
     // How k3s's own add-ons (Traefik and so on) are installed and configured.
     "HelmChart",
     "HelmChartConfig",
@@ -443,6 +457,8 @@ pub const CLUSTER_KINDS: &[&str] = &[
     "ClusterRole",
     "ClusterRoleBinding",
     "CustomResourceDefinition",
+    // Static ones only (see `cluster_backup::keep_persistent_volume`).
+    "PersistentVolume",
 ];
 
 /// Kinds a cluster may not serve or this connection may not list; the
@@ -464,6 +480,7 @@ pub fn keep_in_manifest_backup(kind: &str, obj: &serde_json::Value) -> bool {
         "Service" => !(name == "kubernetes" && meta["namespace"] == json!("default")),
         "Namespace" => !matches!(name, "default" | "kube-system" | "kube-public" | "kube-node-lease"),
         "PriorityClass" => !name.starts_with("system-"),
+        "PersistentVolume" => crate::cluster_backup::keep_persistent_volume(obj),
         "ClusterRole" | "ClusterRoleBinding" => {
             !name.starts_with("system:") && meta["labels"]["kubernetes.io/bootstrapping"] != json!("rbac-defaults")
         }
@@ -650,5 +667,20 @@ mod tests {
         let mut v = serde_json::to_value(spec()).unwrap();
         v.as_object_mut().unwrap().remove("image");
         assert_eq!(serde_json::from_value::<BackupSpec>(v).unwrap().image, DEFAULT_IMAGE);
+    }
+
+    #[test]
+    fn copied_archives_are_removable_only_between_runs() {
+        use crate::files::ClaimUsers;
+        let cron = format!("CronJob {} isn't suspended; its next run would mount it. Suspend it first.", object_name("uploads"));
+        let idle = ClaimUsers { workloads: vec![format!("CronJob/{}", object_name("uploads"))], blockers: vec![cron.clone()], pods: vec![] };
+        assert!(archives_removable(&idle, "uploads"));
+        let running = ClaimUsers { pods: vec![("run-pod".into(), None)], ..idle.clone() };
+        assert!(!archives_removable(&running, "uploads"), "a run is writing to it");
+        let other = ClaimUsers { blockers: vec![cron, "Deployment x is at 1 replica. Scale it to 0.".into()], ..idle };
+        assert!(!archives_removable(&other, "uploads"));
+        let hash = "a".repeat(64);
+        assert_eq!(crate::files::parse_sha256(&format!("{}  /mnt/x.tar.gz\n", hash.to_uppercase())), Some(hash));
+        assert_eq!(crate::files::parse_sha256("sha256sum: can't open"), None);
     }
 }

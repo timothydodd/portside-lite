@@ -7,3 +7,9 @@ repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+# Backups: files sealed with a passphrase, readable with the `age` tool.
+[dependencies]
+age = "0.11"
+flate2 = "1"
+tar = "0.4"

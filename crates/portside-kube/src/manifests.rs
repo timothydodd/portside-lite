@@ -37,7 +37,8 @@ fn group_version(kind: &str) -> Result<(&'static str, &'static str)> {
         "StorageClass" => ("storage.k8s.io", "v1"),
         "Role" | "RoleBinding" | "ClusterRole" | "ClusterRoleBinding" => ("rbac.authorization.k8s.io", "v1"),
         "Pod" | "Service" | "ConfigMap" | "Secret" | "PersistentVolumeClaim" | "PersistentVolume" | "ServiceAccount" | "Namespace"
-        | "Node" | "Event" | "Endpoints" => ("", "v1"),
+        | "Node" | "Event" | "Endpoints" | "LimitRange" | "ResourceQuota" => ("", "v1"),
+        "EndpointSlice" => ("discovery.k8s.io", "v1"),
         _ => return Err(other(format!("{kind} objects aren't handled here"))),
     })
 }
@@ -268,96 +269,222 @@ pub async fn export_bundle(client: &Client, kind: &str, namespace: &str, name: &
     Ok(docs.join("---\n"))
 }
 
-/// A manifest backup of a whole cluster, as files relative to the backup's folder.
+/// A cluster backup's contents from the API, as files relative to the backup's folder.
+#[derive(Default)]
 pub struct ManifestBackup {
-    pub files: Vec<(String, String)>,
+    /// Plain files: the YAML, `secrets-needed.md`, `helm-releases.md`.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Files to seal with the passphrase (only asked for when there is one):
+    /// Secret values and Helm release values.
+    pub sealed: Vec<(String, Vec<u8>)>,
     pub objects: usize,
+    pub custom_resources: usize,
+    pub sealed_secrets: usize,
+    pub helm_releases: usize,
     /// Kinds left out because the cluster doesn't serve them or this
     /// connection may not list them.
     pub skipped: Vec<String>,
+    pub images_in_use: std::collections::BTreeMap<String, Vec<String>>,
+    pub node_only_images: Vec<portside_core::cluster_backup::NodeImage>,
+    pub volume_backups: Vec<portside_core::cluster_backup::VolumeBackupRef>,
+    pub server_version: Option<String>,
 }
 
-/// Everything a manifest backup saves: `cluster/<Kind>.yaml` for the
-/// cluster-wide settings, `namespaces/<ns>/<Kind>.yaml` for the rest (each a
-/// multi-document file Import can apply), `secrets-needed.md` with Secret
-/// names and key names only, and a README. Secret values are never read
+type FileDocs = std::collections::BTreeMap<String, Vec<(String, String)>>;
+
+fn add_doc(by_file: &mut FileDocs, kind_file: &str, v: &mut Value) -> Result<()> {
+    let ns = v.pointer("/metadata/namespace").and_then(Value::as_str).filter(|n| !n.is_empty()).map(str::to_string);
+    let name = v.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default().to_string();
+    clean_for_export(v);
+    let path = match ns {
+        Some(ns) => format!("namespaces/{}/{kind_file}", portside_core::archive::safe_segment(&ns)),
+        None => format!("cluster/{kind_file}"),
+    };
+    by_file.entry(path).or_default().push((name, to_yaml(v)?));
+    Ok(())
+}
+
+fn join_docs(mut docs: Vec<(String, String)>) -> Vec<u8> {
+    docs.sort();
+    docs.into_iter().map(|(_, y)| y).collect::<Vec<_>>().join("---\n").into_bytes()
+}
+
+async fn list_all(client: &Client, kind: &str) -> Result<Vec<Value>> {
+    let (api, ar) = api_for_kind(client, kind, None).await?;
+    api.list(&ListParams::default()).await?.items.into_iter().map(|o| to_value(o, &ar)).collect()
+}
+
+/// Everything a cluster backup reads from the API: `cluster/<Kind>.yaml`
+/// for the cluster-wide settings, `namespaces/<ns>/<Kind>.yaml` for the
+/// rest (each a multi-document file Import can apply), custom resources of
+/// every CRD as `<Kind>.<group>.yaml`, `secrets-needed.md` (names and key
+/// names) and `helm-releases.md`. With `seal`, Secret values and Helm
+/// values go to [`ManifestBackup::sealed`]; without it they're never read
 /// into the backup.
-pub async fn manifest_backup(client: &Client, cluster: &str, taken_ms: i64) -> Result<ManifestBackup> {
+pub async fn manifest_backup(client: &Client, seal: bool) -> Result<ManifestBackup> {
     use portside_core::backup::{keep_in_manifest_backup, secret_line, CLUSTER_KINDS, MANIFEST_KINDS, OPTIONAL_KINDS};
-    let mut files = Vec::new();
-    let mut skipped = Vec::new();
-    let mut objects = 0;
+    use portside_core::cluster_backup as cb;
+    let mut out = ManifestBackup { server_version: client.apiserver_version().await.ok().map(|v| v.git_version), ..Default::default() };
+    let mut by_file = FileDocs::new();
+    let mut crds = Vec::new();
+    let mut services = Vec::new();
+    let mut cron_jobs = Vec::new();
     for kind in CLUSTER_KINDS.iter().chain(MANIFEST_KINDS) {
-        let listed = async {
-            let (api, ar) = api_for_kind(client, kind, None).await?;
-            Ok::<_, KubeError>((api.list(&ListParams::default()).await?.items, ar))
-        }
-        .await;
-        let (items, ar) = match listed {
+        let items = match list_all(client, kind).await {
             Ok(v) => v,
             // Not served (no k3s Helm controller), or not allowed: say so and go on.
             Err(e) if OPTIONAL_KINDS.contains(kind) || e.api_status() == Some(403) => {
-                skipped.push(format!("{kind}: {e}"));
+                out.skipped.push(format!("{kind}: {e}"));
                 continue;
             }
             Err(e) => return Err(other(format!("Couldn't list {kind}s: {e}"))),
         };
-        let mut by_file: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
-        for obj in items {
-            let mut v = to_value(obj, &ar)?;
-            if !keep_in_manifest_backup(kind, &v) {
-                continue;
+        for mut v in items {
+            match *kind {
+                "CustomResourceDefinition" => crds.push(v.clone()),
+                "Service" => services.push(v.clone()),
+                "CronJob" => cron_jobs.push(v.clone()),
+                _ => {}
             }
-            let ns = v.pointer("/metadata/namespace").and_then(Value::as_str).map(str::to_string);
-            let name = v.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default().to_string();
-            clean_for_export(&mut v);
-            let path = match ns {
-                Some(ns) => format!("namespaces/{}/{kind}.yaml", portside_core::archive::safe_segment(&ns)),
-                None => format!("cluster/{kind}.yaml"),
-            };
-            by_file.entry(path).or_default().push((name, to_yaml(&v)?));
+            if keep_in_manifest_backup(kind, &v) {
+                add_doc(&mut by_file, &format!("{kind}.yaml"), &mut v)?;
+                out.objects += 1;
+            }
         }
-        for (path, mut docs) in by_file {
-            docs.sort();
-            objects += docs.len();
-            files.push((path, docs.into_iter().map(|(_, y)| y).collect::<Vec<_>>().join("---\n")));
+    }
+    out.volume_backups = cb::volume_backup_refs(&cron_jobs);
+
+    // Hand-made endpoints (Services without a selector that point outside the cluster).
+    let selectorless = cb::selectorless_services(&services);
+    for kind in ["Endpoints", "EndpointSlice"] {
+        match list_all(client, kind).await {
+            Ok(items) => {
+                for mut v in items {
+                    let keep = if kind == "Endpoints" { cb::keep_endpoints(&v, &selectorless) } else { cb::keep_endpoint_slice(&v) };
+                    if keep {
+                        add_doc(&mut by_file, &format!("{kind}.yaml"), &mut v)?;
+                        out.objects += 1;
+                    }
+                }
+            }
+            Err(e) => out.skipped.push(format!("{kind}: {e}")),
         }
     }
 
-    let mut secrets = String::from("# Secrets the workloads need\n\nNot in this backup: recreate these (same name, type and keys) before importing the workloads that use them.\n\n");
+    // Objects of every custom resource type (Traefik routes, certificates, …).
+    for crd in &crds {
+        let Some(r) = cb::crd_resource(crd) else { continue };
+        let ar = ApiResource::from_gvk_with_plural(&GroupVersionKind::gvk(&r.group, &r.version, &r.kind), &r.plural);
+        let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+        match api.list(&ListParams::default()).await {
+            Ok(list) => {
+                for obj in list.items {
+                    let mut v = to_value(obj, &ar)?;
+                    if cb::keep_custom_resource(&v) {
+                        add_doc(&mut by_file, &r.file_name(), &mut v)?;
+                        out.objects += 1;
+                        out.custom_resources += 1;
+                    }
+                }
+            }
+            Err(e) => out.skipped.push(format!("{}.{}: {e}", r.kind, r.group)),
+        }
+    }
+    for (path, docs) in by_file {
+        out.files.push((path, join_docs(docs)));
+    }
+
+    // Secrets: names always; values (and Helm's release records) only sealed.
+    let mut secrets_md = String::from("# Secrets the workloads need\n\n");
     match Api::<k8s_openapi::api::core::v1::Secret>::all(client.clone()).list(&ListParams::default()).await {
         Ok(list) => {
-            let mut lines: Vec<String> = list
-                .items
-                .iter()
-                .filter_map(|s| serde_json::to_value(s).ok())
-                .filter(|v| keep_in_manifest_backup("Secret", v))
-                .filter_map(|v| secret_line(&v))
-                .collect();
+            let all: Vec<Value> = list.items.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
+            let latest = cb::latest_helm_secrets(&all);
+            let mut releases: Vec<cb::HelmRelease> = all.iter().filter(|s| latest.contains(&ns_name(s))).filter_map(cb::helm_release).collect();
+            releases.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+            out.helm_releases = releases.len();
+            out.files.push(("helm-releases.md".into(), cb::helm_releases_md(&releases, seal).into_bytes()));
+            let mut lines: Vec<String> = all.iter().filter(|v| keep_in_manifest_backup("Secret", v)).filter_map(secret_line).collect();
             lines.sort();
-            secrets.push_str(&if lines.is_empty() { "None.".to_string() } else { lines.join("\n") });
+            secrets_md.push_str(if seal {
+                "Their values are in `secrets.tar.gz.age`, sealed with your backup passphrase; a rebuild puts them back.\n\n"
+            } else {
+                "Not in this backup (no backup passphrase is set): recreate these (same name, type and keys) before importing the workloads that use them.\n\n"
+            });
+            secrets_md.push_str(&if lines.is_empty() { "None.".to_string() } else { lines.join("\n") });
+            if seal {
+                let mut docs = Vec::new();
+                for v in all.iter().filter(|v| cb::seal_secret(v, &latest)) {
+                    let mut v = v.clone();
+                    if v.get("apiVersion").is_none() {
+                        v["apiVersion"] = Value::from("v1");
+                        v["kind"] = Value::from("Secret");
+                    }
+                    let (ns, name) = ns_name(&v);
+                    clean_for_export(&mut v);
+                    docs.push((format!("{ns}/{name}"), to_yaml(&v)?));
+                }
+                out.sealed_secrets = docs.len();
+                out.sealed.push((cb::SEALED_SECRETS.into(), join_docs(docs)));
+                for r in releases.iter().filter(|r| r.values.is_some()) {
+                    let path = format!(
+                        "{}/{}/{}.yaml",
+                        cb::SEALED_HELM_VALUES,
+                        portside_core::archive::safe_segment(&r.namespace),
+                        portside_core::archive::safe_segment(&r.name)
+                    );
+                    out.sealed.push((path, r.values.clone().unwrap_or_default().into_bytes()));
+                }
+            }
         }
         Err(e) => {
-            secrets.push_str(&format!("Couldn't list Secrets: {e}"));
-            skipped.push(format!("Secret names: {e}"));
+            secrets_md.push_str(&format!("Couldn't list Secrets: {e}"));
+            out.skipped.push(format!("Secrets: {e}"));
         }
     }
-    secrets.push('\n');
-    files.push(("secrets-needed.md".into(), secrets));
+    secrets_md.push('\n');
+    out.files.push(("secrets-needed.md".into(), secrets_md.into_bytes()));
 
-    let when = portside_core::jiff::Timestamp::from_millisecond(taken_ms).map(|t| t.to_string()).unwrap_or_default();
-    let mut readme = format!(
-        "# Manifest backup of {cluster}\n\nTaken {when} by Portside Lite. {objects} objects.\n\n\
-         - `cluster/`: cluster-wide settings (namespaces, storage classes, cluster roles, CRDs, ...).\n\
-         - `namespaces/<namespace>/<Kind>.yaml`: everything else, one file per kind.\n\
-         - `secrets-needed.md`: Secrets aren't saved; this lists the ones to recreate.\n\n\
-         To restore, use Import in Portside (or `kubectl apply -f`): `cluster/` first, then the namespaces.\n"
-    );
-    if !skipped.is_empty() {
-        readme.push_str(&format!("\nLeft out:\n\n{}\n", skipped.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")));
+    // Images: what runs, and what only the node has.
+    match Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone()).list(&ListParams::default()).await {
+        Ok(list) => {
+            let pods: Vec<Value> = list.items.iter().filter_map(|p| serde_json::to_value(p).ok()).collect();
+            out.images_in_use = cb::images_in_use(&pods);
+            out.node_only_images = cb::node_only_images(&pods);
+        }
+        Err(e) => out.skipped.push(format!("Pods (for images.md): {e}")),
     }
-    files.push(("README.md".into(), readme));
-    Ok(ManifestBackup { files, objects, skipped })
+    Ok(out)
+}
+
+/// Wait until these CRDs are Established (their objects can be sent), up to
+/// `timeout`. Returns the ones that still aren't.
+pub async fn wait_established(client: &Client, names: &[String], timeout: std::time::Duration) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut waiting: Vec<String> = names.to_vec();
+    loop {
+        let mut still = Vec::new();
+        for name in waiting {
+            let ready = get_value(client, "CustomResourceDefinition", None, &name).await.is_ok_and(|v| {
+                v.pointer("/status/conditions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|cs| cs.iter().any(|c| c["type"] == "Established" && c["status"] == "True"))
+            });
+            if !ready {
+                still.push(name);
+            }
+        }
+        if still.is_empty() || tokio::time::Instant::now() >= deadline {
+            return still;
+        }
+        waiting = still;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+fn ns_name(v: &Value) -> (String, String) {
+    let get = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or_default().to_string();
+    (get("/metadata/namespace"), get("/metadata/name"))
 }
 
 #[derive(Debug, Clone, Serialize)]

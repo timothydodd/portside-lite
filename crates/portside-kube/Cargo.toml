@@ -16,4 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34"
 thiserror = { workspace = true }
+# The node's files arrive as a .tar.gz (both already in the tree).
+flate2 = "1"
+tar = "0.4"
 tokio = { workspace = true }

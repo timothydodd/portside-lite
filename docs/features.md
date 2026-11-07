@@ -17,6 +17,8 @@ a plain-language next step and, where possible, a button for it.
 - Services with no endpoints, and Ingress routes that point at a Service that doesn't exist
 - ServiceAccounts in use that list a pull secret that doesn't exist
 - Error-log spikes per pod
+- Volumes with no volume backup, and workloads keeping data in a hostPath folder on the node (both
+  informational: a rebuilt cluster would come back without that data)
 
 **History.** The app records when each problem started and resolved, and which ones keep coming
 back.
@@ -174,25 +176,63 @@ PC's time):
 
 - **Copy volume backups to this PC** (on by default): copies the archives each volume backup keeps
   on its cluster into the backup folder, only the ones not already there, and keeps the newest N
-  per volume. Until they're copied, backups sit on the same disk as the data.
-- **Back up manifests and cluster settings** (on by default): saves every namespace's workloads,
-  Services, ConfigMaps, claims, Ingresses, autoscalers and access rules, plus cluster-wide settings
-  (namespaces, storage classes, cluster roles and bindings, ingress and priority classes, CRDs, and
-  k3s's HelmChart/HelmChartConfig objects), as YAML you can bring back with **Import**. Objects a
-  controller recreates and ones the cluster makes for itself are left out. **Secret values are
-  never saved**; `secrets-needed.md` lists each Secret's name, type and key names so you know what
-  to recreate.
+  per volume. Until they're copied, backups sit on the same disk as the data. For nodes short on
+  disk, **Remove from the cluster once copied** (off by default) checks each copied archive's
+  SHA-256 against the cluster's copy and deletes it there only when they match; it waits while a
+  backup run is using the storage.
+- **Back up each cluster** (on by default): everything needed to rebuild the cluster on a new
+  machine:
+  - every namespace's workloads, Services, ConfigMaps, claims, Ingresses, autoscalers, access rules,
+    PodDisruptionBudgets, NetworkPolicies, LimitRanges and ResourceQuotas, and hand-made endpoints;
+  - cluster-wide settings (namespaces, storage classes, static PersistentVolumes, cluster roles and
+    bindings, ingress and priority classes, CRDs, k3s's HelmChart/HelmChartConfig objects) and the
+    objects of every custom resource type (Traefik routes, certificates, …);
+  - `helm-releases.md` (chart, version and revision of each Helm release) and `images.md` (every
+    image in use);
+  - with a **backup passphrase**: Secret values, each Helm release's newest record and its values,
+    sealed into `secrets.tar.gz.age`. It's a standard [age](https://age-encryption.org) file, so
+    `age -d` opens it without Portside. Without a passphrase Secret values aren't saved and
+    `secrets-needed.md` lists what to recreate. Keep the passphrase somewhere other than this PC;
+  - through an SSH connection, the k3s server's own files: `config.yaml`, `registries.yaml`, custom
+    manifests in `server/manifests` (and `.skip` files), the service's install flags; ones holding a
+    credential (the join token, registry logins) only when sealed;
+  - through SSH, images that only the node has (imported onto it, or set to never pull), exported
+    once each into `<connection>/images/`;
+  - optionally (**Also snapshot the k3s datastore**, needs the passphrase) an etcd snapshot or
+    SQLite copy plus the server token, sealed. Restoring that is done by hand; the backup's README
+    says how.
 
-On disk: `<backup folder>/<connection>/volumes/<namespace>/<volume>/` and
-`<backup folder>/<connection>/manifests/<date_time>/` (with a README). A run missed while the PC
-was off or asleep happens as soon as Portside starts again or the PC wakes; a failed one is retried
-an hour later. Jobs run one at a time, across every connection: when several are due at once, or
-you press **Run now** during a run, the rest wait in a queue. The Backups page shows each
-connection's last copy and manifest backup (and any error), what's running and queued, and how many
-copies of each volume are on this PC.
+  Objects a controller recreates and ones the cluster makes for itself are left out. A part that
+  can't be saved (the node didn't answer, an image wouldn't export) is noted as a warning; the rest
+  is saved.
+
+On disk: `<backup folder>/<connection>/volumes/<namespace>/<volume>/`,
+`<backup folder>/<connection>/manifests/<date_time>/` (with a README and `backup.json`) and
+`<backup folder>/<connection>/images/`. A run missed while the PC was off or asleep happens as soon
+as Portside starts again or the PC wakes; a failed one is retried an hour later. Jobs run one at a
+time, across every connection: when several are due at once, or you press **Run now** during a
+run, the rest wait in a queue. The Backups page shows each connection's last copy and cluster
+backup (and any error or warning), what's running and queued, and how many copies of each volume
+are on this PC.
 
 A failed run shows as **Volume backup failed** on Problems, and one that's overdue as **Volume
 backup is overdue**. Both offer **Run backup now**.
+
+### Rebuilding a cluster
+
+**Backups → Rebuild a cluster…** puts a cluster back from one of the backups on this PC, onto any
+saved connection: a new machine (add it as an SSH connection first) or the same one.
+
+1. **The node** (SSH connections): **Put node files back** writes the backup's k3s config,
+   registries and custom manifests onto the server, and node-only images into `agent/images`. On a
+   new machine do this before installing k3s, which reads them; the dialog offers **Install k3s**
+   when it's missing. On a running k3s it can restart it to pick them up.
+2. **Cluster contents**: **Dry run** first, then **Rebuild**. CRDs go first (and are waited on),
+   then namespaces, accounts, config, Secrets (from the sealed file; the dialog asks for the
+   passphrase if it isn't the saved one), claims, Services and custom resources; then each backed-up
+   volume's newest archive from this PC is unpacked into its claim; the workloads come last, so
+   nothing has a claim mounted while it's written. What k3s installs itself (CoreDNS, local-path,
+   Traefik through its HelmChart) is left to k3s instead of being overwritten with the old version.
 
 ## Logs
 

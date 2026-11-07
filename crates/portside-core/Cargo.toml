@@ -11,6 +11,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 base64 = "0.22"
+# Helm release records are gzipped (already in the tree through russh).
+flate2 = "1"
 # Already in the tree (russh); dates only here, no clock or time zones.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 thiserror = { workspace = true }

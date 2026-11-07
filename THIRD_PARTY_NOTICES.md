@@ -45,16 +45,19 @@ are used unmodified. Their source code is available from the repositories linked
 - Kubernetes is a registered trademark of The Linux Foundation. k3s is a CNCF project. Portside
   Lite isn't affiliated with or endorsed by either.
 
-## Rust crates (424)
+## Rust crates (485)
 
-Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MIT (70), MIT (64), Unicode-3.0 (18), MIT/Apache-2.0 (11), Apache-2.0 (10), Unlicense OR MIT (8), BSD-3-Clause (5), MPL-2.0 (5), Apache-2.0 OR ISC OR MIT (3), ISC (2), MIT OR Zlib OR Apache-2.0 (2), Unlicense/MIT (2), Zlib (2), (Apache-2.0 OR MIT) AND BSD-3-Clause (1), (MIT OR Apache-2.0) AND Unicode-3.0 (1), 0BSD OR MIT OR Apache-2.0 (1), Apache-2.0 / MIT (1), Apache-2.0 AND ISC (1), Apache-2.0 AND MIT (1), Apache-2.0 OR BSL-1.0 (1), BSD-2-Clause OR Apache-2.0 OR MIT (1), BSD-3-Clause AND MIT (1), BSD-3-Clause/MIT (1), CC0-1.0 OR MIT-0 OR Apache-2.0 (1), MIT OR Apache-2.0 OR Zlib (1), Zlib OR Apache-2.0 OR MIT (1).
+Linked into the desktop app. Licenses: MIT OR Apache-2.0 (237), Apache-2.0 OR MIT (82), MIT (75), Unicode-3.0 (18), MIT/Apache-2.0 (15), Apache-2.0 (11), Unlicense OR MIT (8), BSD-3-Clause (7), MPL-2.0 (5), Apache-2.0 OR ISC OR MIT (3), Apache-2.0/MIT (2), ISC (2), MIT OR Zlib OR Apache-2.0 (2), Unlicense/MIT (2), Zlib (2), (Apache-2.0 OR MIT) AND BSD-3-Clause (1), (MIT OR Apache-2.0) AND Unicode-3.0 (1), 0BSD OR MIT OR Apache-2.0 (1), Apache-2.0 / MIT (1), Apache-2.0 AND ISC (1), Apache-2.0 AND MIT (1), Apache-2.0 OR BSL-1.0 (1), Apache-2.0 OR GPL-2.0-only (1), BSD-2-Clause OR Apache-2.0 OR MIT (1), BSD-3-Clause AND MIT (1), BSD-3-Clause/MIT (1), CC0-1.0 OR MIT-0 OR Apache-2.0 (1), MIT OR Apache-2.0 OR Zlib (1), Zlib OR Apache-2.0 OR MIT (1).
 
 | Package | Version | License |
 | --- | --- | --- |
 | [adler2](https://github.com/oyvindln/adler2) | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
+| [aead](https://github.com/RustCrypto/traits) | 0.5.2 | MIT OR Apache-2.0 |
 | [aead](https://github.com/RustCrypto/traits) | 0.6.1 | MIT OR Apache-2.0 |
 | [aes](https://github.com/RustCrypto/block-ciphers) | 0.9.3 | MIT OR Apache-2.0 |
 | [aes-gcm](https://github.com/RustCrypto/AEADs) | 0.11.1 | Apache-2.0 OR MIT |
+| [age](https://github.com/str4d/rage) | 0.11.5 | MIT OR Apache-2.0 |
+| [age-core](https://github.com/str4d/rage) | 0.11.0 | MIT OR Apache-2.0 |
 | [ahash](https://github.com/tkaitchuck/ahash) | 0.8.12 | MIT OR Apache-2.0 |
 | [aho-corasick](https://github.com/BurntSushi/aho-corasick) | 1.1.5 | Unlicense OR MIT |
 | [alloc-no-stdlib](https://github.com/dropbox/rust-alloc-no-stdlib) | 3.0.0 | BSD-3-Clause |
@@ -62,14 +65,18 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [annotate-snippets](https://github.com/rust-lang/annotate-snippets-rs) | 0.12.16 | MIT OR Apache-2.0 |
 | [anstyle](https://github.com/rust-cli/anstyle.git) | 1.0.14 | MIT OR Apache-2.0 |
 | [anyhow](https://github.com/dtolnay/anyhow) | 1.0.104 | MIT OR Apache-2.0 |
+| [arc-swap](https://github.com/vorner/arc-swap) | 1.9.3 | MIT OR Apache-2.0 |
 | [argon2](https://github.com/RustCrypto/password-hashes) | 0.6.0 | MIT OR Apache-2.0 |
 | [arraydeque](https://github.com/andylokandy/arraydeque) | 0.5.1 | MIT/Apache-2.0 |
 | [atomic-waker](https://github.com/smol-rs/atomic-waker) | 1.1.2 | Apache-2.0 OR MIT |
 | [base16ct](https://github.com/RustCrypto/formats) | 1.0.0 | Apache-2.0 OR MIT |
+| [base64](https://github.com/marshallpierce/rust-base64) | 0.21.7 | MIT OR Apache-2.0 |
 | [base64](https://github.com/marshallpierce/rust-base64) | 0.22.1 | MIT OR Apache-2.0 |
 | [base64](https://github.com/marshallpierce/rust-base64) | 0.23.1 | MIT OR Apache-2.0 |
 | [base64ct](https://github.com/RustCrypto/formats) | 1.8.3 | Apache-2.0 OR MIT |
+| [basic-toml](https://github.com/dtolnay/basic-toml) | 0.1.10 | MIT OR Apache-2.0 |
 | [bcrypt-pbkdf](https://github.com/RustCrypto/password-hashes) | 0.11.0 | MIT OR Apache-2.0 |
+| [bech32](https://github.com/rust-bitcoin/rust-bech32) | 0.9.1 | MIT |
 | [bit-set](https://github.com/contain-rs/bit-set) | 0.8.0 | Apache-2.0 OR MIT |
 | [bit-vec](https://github.com/contain-rs/bit-vec) | 0.8.0 | Apache-2.0 OR MIT |
 | [bitflags](https://github.com/bitflags/bitflags) | 1.3.2 | MIT/Apache-2.0 |
@@ -91,11 +98,15 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [cfb](https://github.com/mdsteele/rust-cfb) | 0.14.0 | MIT |
 | [cfg-if](https://github.com/rust-lang/cfg-if) | 1.0.5 | MIT OR Apache-2.0 |
 | [chacha20](https://github.com/RustCrypto/stream-ciphers) | 0.10.2 | MIT OR Apache-2.0 |
+| [chacha20](https://github.com/RustCrypto/stream-ciphers) | 0.9.1 | Apache-2.0 OR MIT |
+| [chacha20poly1305](https://github.com/RustCrypto/AEADs/tree/master/chacha20poly1305) | 0.10.1 | Apache-2.0 OR MIT |
 | [chrono](https://github.com/chronotope/chrono) | 0.4.45 | MIT OR Apache-2.0 |
+| [cipher](https://github.com/RustCrypto/traits) | 0.4.4 | MIT OR Apache-2.0 |
 | [cipher](https://github.com/RustCrypto/traits) | 0.5.2 | MIT OR Apache-2.0 |
 | [cmov](https://github.com/RustCrypto/utils) | 0.5.4 | Apache-2.0 OR MIT |
 | [const-oid](https://github.com/RustCrypto/formats) | 0.10.2 | Apache-2.0 OR MIT |
 | [cookie](https://github.com/SergioBenitez/cookie-rs) | 0.18.2 | MIT OR Apache-2.0 |
+| [cookie-factory](https://github.com/rust-bakery/cookie-factory) | 0.3.3 | MIT |
 | [core_detect](https://github.com/thomcc/core_detect) | 1.0.0 | MIT/Apache-2.0 |
 | [cpubits](https://github.com/RustCrypto/utils) | 0.1.1 | MIT OR Apache-2.0 |
 | [cpufeatures](https://github.com/RustCrypto/utils) | 0.2.17 | MIT OR Apache-2.0 |
@@ -112,6 +123,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [ctor](https://github.com/mmastrac/linktime) | 1.0.13 | Apache-2.0 OR MIT |
 | [ctr](https://github.com/RustCrypto/block-modes) | 0.10.1 | MIT OR Apache-2.0 |
 | [ctutils](https://github.com/RustCrypto/utils) | 0.4.2 | Apache-2.0 OR MIT |
+| [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek) | 4.1.3 | BSD-3-Clause |
 | [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek) | 5.0.0 | BSD-3-Clause |
 | [curve25519-dalek-derive](https://github.com/dalek-cryptography/curve25519-dalek) | 0.1.1 | MIT/Apache-2.0 |
 | [darling](https://github.com/TedDriggs/darling) | 0.24.1 | MIT |
@@ -153,7 +165,13 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [fastrand](https://github.com/smol-rs/fastrand) | 2.5.0 | Apache-2.0 OR MIT |
 | [fdeflate](https://github.com/image-rs/fdeflate) | 0.3.7 | MIT OR Apache-2.0 |
 | [ff](https://github.com/zkcrypto/ff) | 0.14.0 | MIT/Apache-2.0 |
+| [filetime](https://github.com/alexcrichton/filetime) | 0.2.29 | MIT/Apache-2.0 |
+| [find-crate](https://github.com/taiki-e/find-crate) | 0.6.3 | Apache-2.0 OR MIT |
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.10 | MIT OR Apache-2.0 |
+| [fluent](https://github.com/projectfluent/fluent-rs) | 0.16.1 | Apache-2.0 OR MIT |
+| [fluent-bundle](https://github.com/projectfluent/fluent-rs) | 0.15.3 | Apache-2.0 OR MIT |
+| [fluent-langneg](https://github.com/projectfluent/fluent-langneg-rs) | 0.13.1 | Apache-2.0 OR MIT |
+| [fluent-syntax](https://github.com/projectfluent/fluent-rs) | 0.11.1 | Apache-2.0 OR MIT |
 | [fnv](https://github.com/servo/rust-fnv) | 1.0.7 | Apache-2.0 / MIT |
 | [foldhash](https://github.com/orlp/foldhash) | 0.2.0 | Zlib |
 | [form_urlencoded](https://github.com/servo/rust-url) | 1.2.2 | MIT OR Apache-2.0 |
@@ -181,7 +199,9 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [heck](https://github.com/withoutboats/heck) | 0.5.0 | MIT OR Apache-2.0 |
 | [hex](https://github.com/KokaKiwi/rust-hex) | 0.4.3 | MIT OR Apache-2.0 |
 | [hex-literal](https://github.com/RustCrypto/utils) | 1.1.0 | MIT OR Apache-2.0 |
+| [hkdf](https://github.com/RustCrypto/KDFs/) | 0.12.4 | MIT OR Apache-2.0 |
 | [hkdf](https://github.com/RustCrypto/KDFs/) | 0.13.0 | MIT OR Apache-2.0 |
+| [hmac](https://github.com/RustCrypto/MACs) | 0.12.1 | MIT OR Apache-2.0 |
 | [hmac](https://github.com/RustCrypto/MACs) | 0.13.0 | MIT OR Apache-2.0 |
 | [html5ever](https://github.com/servo/html5ever) | 0.39.0 | MIT OR Apache-2.0 |
 | [http](https://github.com/hyperium/http) | 1.5.0 | MIT OR Apache-2.0 |
@@ -193,6 +213,10 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [hyper-rustls](https://github.com/rustls/hyper-rustls) | 0.27.10 | Apache-2.0 OR ISC OR MIT |
 | [hyper-timeout](https://github.com/hjr3/hyper-timeout) | 0.5.2 | MIT OR Apache-2.0 |
 | [hyper-util](https://github.com/hyperium/hyper-util) | 0.1.21 | MIT |
+| [i18n-config](https://github.com/kellpossible/cargo-i18n/tree/master/i18n-config) | 0.4.8 | MIT |
+| [i18n-embed](https://github.com/kellpossible/cargo-i18n/tree/master/i18n-embed) | 0.15.4 | MIT |
+| [i18n-embed-fl](https://github.com/kellpossible/cargo-i18n/tree/master/i18n-embed-fl) | 0.9.4 | MIT |
+| [i18n-embed-impl](https://github.com/kellpossible/cargo-i18n/tree/master/i18n-embed) | 0.8.4 | MIT |
 | [ico](https://github.com/mdsteele/rust-ico) | 0.5.0 | MIT |
 | [icu_collections](https://github.com/unicode-org/icu4x) | 2.3.0 | Unicode-3.0 |
 | [icu_locale_core](https://github.com/unicode-org/icu4x) | 2.3.0 | Unicode-3.0 |
@@ -207,7 +231,11 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [indexmap](https://github.com/bluss/indexmap) | 1.9.3 | Apache-2.0 OR MIT |
 | [indexmap](https://github.com/indexmap-rs/indexmap) | 2.14.2 | Apache-2.0 OR MIT |
 | [infer](https://github.com/bojand/infer) | 0.22.0 | MIT |
+| [inout](https://github.com/RustCrypto/utils) | 0.1.4 | MIT OR Apache-2.0 |
 | [inout](https://github.com/RustCrypto/utils) | 0.2.2 | MIT OR Apache-2.0 |
+| [intl-memoizer](https://github.com/projectfluent/fluent-rs) | 0.5.3 | Apache-2.0 OR MIT |
+| [intl_pluralrules](https://github.com/zbraniecki/pluralrules) | 7.0.2 | Apache-2.0/MIT |
+| [io_tee](https://github.com/TheOnlyMrCat/io_tee) | 0.1.1 | MIT OR Apache-2.0 |
 | [ipnet](https://github.com/krisprice/ipnet) | 2.12.2 | MIT OR Apache-2.0 |
 | [itoa](https://github.com/dtolnay/itoa) | 1.0.18 | MIT OR Apache-2.0 |
 | [jiff](https://github.com/BurntSushi/jiff) | 0.2.37 | Unlicense OR MIT |
@@ -224,6 +252,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [kube](https://github.com/kube-rs/kube) | 4.2.0 | Apache-2.0 |
 | [kube-client](https://github.com/kube-rs/kube) | 4.2.0 | Apache-2.0 |
 | [kube-core](https://github.com/kube-rs/kube) | 4.2.0 | Apache-2.0 |
+| [lazy_static](https://github.com/rust-lang-nursery/lazy-static.rs) | 1.5.1 | MIT OR Apache-2.0 |
 | [libc](https://github.com/rust-lang/libc) | 0.2.189 | MIT OR Apache-2.0 |
 | [libsqlite3-sys](https://github.com/rusqlite/rusqlite) | 0.38.2 | MIT |
 | [litemap](https://github.com/unicode-org/icu4x) | 0.8.3 | Unicode-3.0 |
@@ -233,6 +262,8 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [md5](https://github.com/stainless-steel/md5) | 0.8.1 | Apache-2.0 OR MIT |
 | [memchr](https://github.com/BurntSushi/memchr) | 2.8.3 | Unlicense OR MIT |
 | [mime](https://github.com/hyperium/mime) | 0.3.17 | MIT OR Apache-2.0 |
+| [mime_guess](https://github.com/abonander/mime_guess) | 2.0.5 | MIT |
+| [minimal-lexical](https://github.com/Alexhuszagh/minimal-lexical) | 0.2.1 | MIT/Apache-2.0 |
 | [miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | [miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | [mio](https://github.com/tokio-rs/mio) | 1.2.3 | MIT |
@@ -242,12 +273,14 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [multiversion_no_op](https://github.com/hsivonen/multiversion_no_op) | 1.0.0 | Apache-2.0 OR MIT |
 | [new_debug_unreachable](https://github.com/mbrubeck/rust-debug-unreachable) | 1.0.6 | MIT |
 | [nohash-hasher](https://github.com/paritytech/nohash-hasher) | 0.2.0 | Apache-2.0 OR MIT |
+| [nom](https://github.com/Geal/nom) | 7.1.3 | MIT |
 | [notify-rust](https://github.com/hoodie/notify-rust) | 4.18.0 | MIT OR Apache-2.0 |
 | [num-bigint](https://github.com/rust-num/num-bigint) | 0.5.1 | MIT OR Apache-2.0 |
 | [num-conv](https://github.com/jhpratt/num-conv) | 0.2.2 | MIT OR Apache-2.0 |
 | [num-integer](https://github.com/rust-num/num-integer) | 0.1.47 | MIT OR Apache-2.0 |
 | [num-traits](https://github.com/rust-num/num-traits) | 0.2.19 | MIT OR Apache-2.0 |
 | [once_cell](https://github.com/matklad/once_cell) | 1.21.4 | MIT OR Apache-2.0 |
+| [opaque-debug](https://github.com/RustCrypto/utils) | 0.3.1 | MIT OR Apache-2.0 |
 | [open](https://github.com/Byron/open-rs) | 5.4.4 | MIT |
 | [option-ext](https://github.com/soc/option-ext.git) | 0.2.0 | MPL-2.0 |
 | [ordered-float](https://github.com/reem/rust-ordered-float) | 2.10.1 | MIT |
@@ -258,6 +291,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [parking_lot](https://github.com/Amanieu/parking_lot) | 0.12.5 | MIT OR Apache-2.0 |
 | [parking_lot_core](https://github.com/Amanieu/parking_lot) | 0.9.12 | MIT OR Apache-2.0 |
 | [password-hash](https://github.com/RustCrypto/traits) | 0.6.1 | MIT OR Apache-2.0 |
+| [pbkdf2](https://github.com/RustCrypto/password-hashes/tree/master/pbkdf2) | 0.12.2 | MIT OR Apache-2.0 |
 | [pbkdf2](https://github.com/RustCrypto/password-hashes) | 0.13.0 | MIT OR Apache-2.0 |
 | [pem](https://github.com/jcreekmore/pem-rs.git) | 3.0.6 | MIT |
 | [pem-rfc7468](https://github.com/RustCrypto/formats) | 1.0.0 | Apache-2.0 OR MIT |
@@ -271,6 +305,8 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [phf_generator](https://github.com/rust-phf/rust-phf) | 0.13.1 | MIT |
 | [phf_macros](https://github.com/rust-phf/rust-phf) | 0.13.1 | MIT |
 | [phf_shared](https://github.com/rust-phf/rust-phf) | 0.13.1 | MIT |
+| [pin-project](https://github.com/taiki-e/pin-project) | 1.1.13 | Apache-2.0 OR MIT |
+| [pin-project-internal](https://github.com/taiki-e/pin-project) | 1.1.13 | Apache-2.0 OR MIT |
 | [pin-project-lite](https://github.com/taiki-e/pin-project-lite) | 0.2.17 | Apache-2.0 OR MIT |
 | [pkcs1](https://github.com/RustCrypto/formats) | 0.8.0-rc.4 | Apache-2.0 OR MIT |
 | [pkcs5](https://github.com/RustCrypto/formats) | 0.8.1 | Apache-2.0 OR MIT |
@@ -278,6 +314,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [plist](https://github.com/ebarnard/rust-plist/) | 1.10.1 | MIT |
 | [png](https://github.com/image-rs/image-png) | 0.17.16 | MIT OR Apache-2.0 |
 | [png](https://github.com/image-rs/image-png) | 0.18.1 | MIT OR Apache-2.0 |
+| [poly1305](https://github.com/RustCrypto/universal-hashes) | 0.8.0 | Apache-2.0 OR MIT |
 | [poly1305](https://github.com/RustCrypto/universal-hashes) | 0.9.1 | Apache-2.0 OR MIT |
 | [polyval](https://github.com/RustCrypto/universal-hashes) | 0.7.3 | Apache-2.0 OR MIT |
 | [potential_utf](https://github.com/unicode-org/icu4x) | 0.1.6 | Unicode-3.0 |
@@ -286,13 +323,18 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [precomputed-hash](https://github.com/emilio/precomputed-hash) | 0.1.1 | MIT |
 | [primefield](https://github.com/RustCrypto/elliptic-curves) | 0.14.0 | Apache-2.0 OR MIT |
 | [primeorder](https://github.com/RustCrypto/elliptic-curves) | 0.14.0 | Apache-2.0 OR MIT |
+| [proc-macro-error-attr2](https://github.com/GnomedDev/proc-macro-error-2) | 2.0.0 | MIT OR Apache-2.0 |
+| [proc-macro-error2](https://github.com/GnomedDev/proc-macro-error-2) | 2.0.1 | MIT OR Apache-2.0 |
 | [proc-macro2](https://github.com/dtolnay/proc-macro2) | 1.0.107 | MIT OR Apache-2.0 |
 | [quick-xml](https://github.com/tafia/quick-xml) | 0.42.0 | MIT |
 | [quote](https://github.com/dtolnay/quote) | 1.0.47 | MIT OR Apache-2.0 |
 | [rand](https://github.com/rust-random/rand) | 0.10.3 | MIT OR Apache-2.0 |
+| [rand](https://github.com/rust-random/rand) | 0.8.8 | MIT OR Apache-2.0 |
 | [rand](https://github.com/rust-random/rand) | 0.9.5 | MIT OR Apache-2.0 |
+| [rand_chacha](https://github.com/rust-random/rand) | 0.3.1 | MIT OR Apache-2.0 |
 | [rand_chacha](https://github.com/rust-random/rand) | 0.9.0 | MIT OR Apache-2.0 |
 | [rand_core](https://github.com/rust-random/rand_core) | 0.10.1 | MIT OR Apache-2.0 |
+| [rand_core](https://github.com/rust-random/rand) | 0.6.4 | MIT OR Apache-2.0 |
 | [rand_core](https://github.com/rust-random/rand) | 0.9.5 | MIT OR Apache-2.0 |
 | [raw-window-handle](https://github.com/rust-windowing/raw-window-handle) | 0.6.2 | MIT OR Apache-2.0 OR Zlib |
 | [ref-cast](https://github.com/dtolnay/ref-cast) | 1.0.27 | MIT OR Apache-2.0 |
@@ -308,6 +350,10 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [russh](https://github.com/warp-tech/russh) | 0.63.3 | Apache-2.0 |
 | [russh-cryptovec](https://github.com/warp-tech/russh) | 0.62.0 | Apache-2.0 |
 | [russh-util](https://github.com/warp-tech/russh) | 0.52.0 | Apache-2.0 |
+| [rust-embed](https://pyrossh.dev/repos/rust-embed) | 8.13.0 | MIT |
+| [rust-embed-impl](https://pyrossh.dev/repos/rust-embed) | 8.13.0 | MIT |
+| [rust-embed-utils](https://pyrossh.dev/repos/rust-embed) | 8.13.0 | MIT |
+| [rustc-hash](https://github.com/rust-lang-nursery/rustc-hash) | 1.1.0 | Apache-2.0/MIT |
 | [rustc-hash](https://github.com/rust-lang/rustc-hash) | 2.1.3 | Apache-2.0 OR MIT |
 | [rustls](https://github.com/rustls/rustls) | 0.23.45 | Apache-2.0 OR ISC OR MIT |
 | [rustls-native-certs](https://github.com/rustls/rustls-native-certs) | 0.8.4 | Apache-2.0 OR ISC OR MIT |
@@ -316,6 +362,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [rustls-webpki](https://github.com/rustls/webpki) | 0.103.15 | ISC |
 | [rustversion](https://github.com/dtolnay/rustversion) | 1.0.23 | MIT OR Apache-2.0 |
 | [ryu](https://github.com/dtolnay/ryu) | 1.0.23 | Apache-2.0 OR BSL-1.0 |
+| [salsa20](https://github.com/RustCrypto/stream-ciphers) | 0.10.2 | MIT OR Apache-2.0 |
 | [salsa20](https://github.com/RustCrypto/stream-ciphers) | 0.11.0 | MIT OR Apache-2.0 |
 | [same-file](https://github.com/BurntSushi/same-file) | 1.0.6 | Unlicense/MIT |
 | [schannel](https://github.com/steffengy/schannel-rs) | 0.1.29 | MIT |
@@ -324,10 +371,13 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [schemars](https://github.com/GREsau/schemars) | 1.2.2 | MIT |
 | [schemars_derive](https://github.com/GREsau/schemars) | 0.8.22 | MIT |
 | [scopeguard](https://github.com/bluss/scopeguard) | 1.2.0 | MIT OR Apache-2.0 |
+| [scrypt](https://github.com/RustCrypto/password-hashes/tree/master/scrypt) | 0.11.0 | MIT OR Apache-2.0 |
 | [scrypt](https://github.com/RustCrypto/password-hashes) | 0.12.0 | MIT OR Apache-2.0 |
 | [sec1](https://github.com/RustCrypto/formats) | 0.8.1 | Apache-2.0 OR MIT |
 | [secrecy](https://github.com/iqlusioninc/crates/tree/main/secrecy) | 0.10.3 | Apache-2.0 OR MIT |
 | [selectors](https://github.com/servo/stylo) | 0.38.0 | MPL-2.0 |
+| [self_cell](https://github.com/Voultapher/self_cell) | 0.10.3 | Apache-2.0 |
+| [self_cell](https://github.com/Voultapher/self_cell) | 1.3.0 | Apache-2.0 OR GPL-2.0-only |
 | [semver](https://github.com/dtolnay/semver) | 1.0.28 | MIT OR Apache-2.0 |
 | [serde](https://github.com/serde-rs/serde) | 1.0.229 | MIT OR Apache-2.0 |
 | [serde-saphyr](https://github.com/bourumir-wyngs/serde-saphyr) | 0.0.29 | MIT OR Apache-2.0 |
@@ -374,6 +424,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [sync_wrapper](https://github.com/Actyx/sync_wrapper) | 1.0.2 | Apache-2.0 |
 | [synstructure](https://github.com/mystor/synstructure) | 0.14.0 | MIT |
 | [tao](https://github.com/tauri-apps/tao) | 0.37.1 | Apache-2.0 |
+| [tar](https://github.com/composefs/tar-rs) | 0.4.46 | MIT OR Apache-2.0 |
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.0 | Apache-2.0 OR MIT |
 | [tauri-codegen](https://github.com/tauri-apps/tauri) | 2.7.0 | Apache-2.0 OR MIT |
 | [tauri-macros](https://github.com/tauri-apps/tauri) | 2.7.0 | Apache-2.0 OR MIT |
@@ -387,7 +438,9 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [tauri-utils](https://github.com/tauri-apps/tauri) | 2.10.0 | Apache-2.0 OR MIT |
 | [tauri-winrt-notification](https://github.com/tauri-apps/winrt-notification) | 0.7.3 | MIT OR Apache-2.0 |
 | [tendril](https://github.com/servo/html5ever) | 0.5.1 | MIT OR Apache-2.0 |
+| [thiserror](https://github.com/dtolnay/thiserror) | 1.0.69 | MIT OR Apache-2.0 |
 | [thiserror](https://github.com/dtolnay/thiserror) | 2.0.21 | MIT OR Apache-2.0 |
+| [thiserror-impl](https://github.com/dtolnay/thiserror) | 1.0.69 | MIT OR Apache-2.0 |
 | [thiserror-impl](https://github.com/dtolnay/thiserror) | 2.0.21 | MIT OR Apache-2.0 |
 | [time](https://github.com/time-rs/time) | 0.3.55 | MIT OR Apache-2.0 |
 | [time-core](https://github.com/time-rs/time) | 0.1.9 | MIT OR Apache-2.0 |
@@ -399,6 +452,7 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [tokio-rustls](https://github.com/rustls/tokio-rustls) | 0.26.5 | MIT OR Apache-2.0 |
 | [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) | 0.29.0 | MIT |
 | [tokio-util](https://github.com/tokio-rs/tokio) | 0.7.19 | MIT |
+| [toml](https://github.com/toml-rs/toml) | 0.5.11 | MIT/Apache-2.0 |
 | [toml](https://github.com/toml-rs/toml) | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 |
 | [toml_datetime](https://github.com/toml-rs/toml) | 1.1.1+spec-1.1.0 | MIT OR Apache-2.0 |
 | [toml_parser](https://github.com/toml-rs/toml) | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 |
@@ -413,12 +467,17 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [tray-icon](https://github.com/tauri-apps/tray-icon) | 0.25.1 | MIT OR Apache-2.0 |
 | [try-lock](https://github.com/seanmonstar/try-lock) | 0.2.5 | MIT |
 | [tungstenite](https://github.com/snapview/tungstenite-rs) | 0.29.0 | MIT OR Apache-2.0 |
+| [type-map](https://github.com/kardeiz/type-map) | 0.5.1 | MIT/Apache-2.0 |
 | [typeid](https://github.com/dtolnay/typeid) | 1.0.3 | MIT OR Apache-2.0 |
 | [typenum](https://github.com/paholg/typenum) | 1.20.1 | MIT OR Apache-2.0 |
 | [ucd-trie](https://github.com/BurntSushi/ucd-generate) | 0.1.7 | MIT OR Apache-2.0 |
+| [unic-langid](https://github.com/zbraniecki/unic-locale) | 0.9.6 | MIT OR Apache-2.0 |
+| [unic-langid-impl](https://github.com/zbraniecki/unic-locale) | 0.9.6 | MIT OR Apache-2.0 |
+| [unicase](https://github.com/seanmonstar/unicase) | 2.10.0 | MIT OR Apache-2.0 |
 | [unicode-ident](https://github.com/dtolnay/unicode-ident) | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | [unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation) | 1.13.3 | MIT OR Apache-2.0 |
 | [unicode-width](https://github.com/unicode-rs/unicode-width) | 0.2.2 | MIT OR Apache-2.0 |
+| [universal-hash](https://github.com/RustCrypto/traits) | 0.5.1 | MIT OR Apache-2.0 |
 | [universal-hash](https://github.com/RustCrypto/traits) | 0.6.1 | MIT OR Apache-2.0 |
 | [unsafe-libyaml](https://github.com/dtolnay/unsafe-libyaml) | 0.2.11 | MIT |
 | [untrusted](https://github.com/briansmith/untrusted) | 0.9.0 | ISC |
@@ -464,12 +523,14 @@ Linked into the desktop app. Licenses: MIT OR Apache-2.0 (209), Apache-2.0 OR MI
 | [wnaf](https://github.com/RustCrypto/elliptic-curves) | 0.14.1 | Apache-2.0 OR MIT |
 | [writeable](https://github.com/unicode-org/icu4x) | 0.6.4 | Unicode-3.0 |
 | [wry](https://github.com/tauri-apps/wry) | 0.57.0 | Apache-2.0 OR MIT |
+| [x25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek) | 2.0.1 | BSD-3-Clause |
 | [yoke](https://github.com/unicode-org/icu4x) | 0.8.3 | Unicode-3.0 |
 | [yoke-derive](https://github.com/unicode-org/icu4x) | 0.8.3 | Unicode-3.0 |
 | [zerocopy](https://github.com/google/zerocopy) | 0.8.59 | BSD-2-Clause OR Apache-2.0 OR MIT |
 | [zerofrom](https://github.com/unicode-org/icu4x) | 0.1.8 | Unicode-3.0 |
 | [zerofrom-derive](https://github.com/unicode-org/icu4x) | 0.1.8 | Unicode-3.0 |
 | [zeroize](https://github.com/RustCrypto/utils) | 1.9.0 | Apache-2.0 OR MIT |
+| [zeroize_derive](https://github.com/RustCrypto/utils) | 1.5.0 | Apache-2.0 OR MIT |
 | [zerotrie](https://github.com/unicode-org/icu4x) | 0.2.5 | Unicode-3.0 |
 | [zerovec](https://github.com/unicode-org/icu4x) | 0.11.8 | Unicode-3.0 |
 | [zerovec-derive](https://github.com/unicode-org/icu4x) | 0.11.6 | Unicode-3.0 |

@@ -521,6 +521,28 @@ pub fn open_backup_folder(state: State<'_, AppState>, profile_id: Option<String>
     tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
 }
 
+/// Every cluster backup in the backup folder, with the volume archives beside them.
+#[tauri::command]
+pub async fn cluster_backups(state: State<'_, AppState>) -> CmdResult<portside_monitor::rebuild::ClusterBackups> {
+    Ok(state.monitor.cluster_backups().await)
+}
+
+/// Rebuild step 1: a backup's node files and images onto an SSH connection's
+/// node; log lines arrive as `k3s:install` events tagged with the job id.
+#[tauri::command]
+pub async fn restore_node_files(
+    state: State<'_, AppState>,
+    request: portside_monitor::rebuild::NodeRestoreRequest,
+) -> CmdResult<portside_monitor::rebuild::NodeRestoreOutcome> {
+    state.monitor.restore_node_files(request).await
+}
+
+/// Rebuild step 2: a backup's objects, Secrets and volume data onto any connection.
+#[tauri::command]
+pub async fn rebuild_cluster(state: State<'_, AppState>, request: portside_monitor::rebuild::RebuildRequest) -> CmdResult<portside_monitor::rebuild::RebuildOutcome> {
+    state.monitor.rebuild_cluster(request).await
+}
+
 /// Copy a workload (plus chosen related objects and the files of chosen
 /// claims) from the active cluster to any saved connection.
 #[tauri::command]

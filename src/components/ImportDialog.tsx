@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open as openFiles } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
-import { CheckCircle2, ClipboardPaste, FileUp, FlaskConical, ShieldAlert, X } from "lucide-react";
+import { CheckCircle2, ClipboardPaste, FileUp, FlaskConical, MinusCircle, ShieldAlert, X } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { errorMessage } from "../lib/format";
@@ -18,22 +18,26 @@ export const useImportDialog = create<{ open: boolean; show: () => void; close: 
 }));
 
 /** Per-object outcome of an import / restore, in apply order. */
-export function ImportResults({ dryRun, rows }: { dryRun: boolean; rows: ImportResult[] }) {
+export function ImportResults({ dryRun, rows, tall = false }: { dryRun: boolean; rows: ImportResult[]; tall?: boolean }) {
   return (
     <section>
       <h3 className="field-label">{dryRun ? "Dry run: what would happen (in apply order)" : "Result (in apply order)"}</h3>
-      <div className="flex max-h-48 flex-col gap-1 overflow-auto">
+      <div className={`flex flex-col gap-1 overflow-auto ${tall ? "max-h-72" : "max-h-48"}`}>
         {rows.map((r) => (
           <div key={r.index} className="flex items-start gap-2 text-xs">
             {r.outcome === "error" ? (
               <ShieldAlert size={14} className="mt-px shrink-0 text-critical" />
+            ) : r.outcome === "skipped" ? (
+              <MinusCircle size={14} className="mt-px shrink-0 text-content-muted" />
             ) : (
               <CheckCircle2 size={14} className="mt-px shrink-0 text-good" />
             )}
             <span className="w-32 shrink-0 truncate text-content-muted">{r.kind}</span>
             <span className="mono w-40 shrink-0 truncate text-content" title={r.name}>{r.name}</span>
             <span className="min-w-0 flex-1 text-content-secondary">
-              {r.outcome === "error" ? r.message : `${dryRun ? "would be " : ""}${r.outcome}${r.namespace ? ` in ${r.namespace}` : ""}${r.message ? ` · ${r.message}` : ""}`}
+              {r.outcome === "error"
+                ? r.message
+                : `${dryRun && r.outcome !== "skipped" ? "would be " : ""}${r.outcome === "skipped" ? "left to k3s" : r.outcome}${r.namespace ? ` in ${r.namespace}` : ""}${r.message ? ` · ${r.message}` : ""}`}
             </span>
           </div>
         ))}

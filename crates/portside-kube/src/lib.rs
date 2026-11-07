@@ -13,6 +13,7 @@ pub mod k3s;
 pub mod collect;
 pub mod logs;
 pub mod manifests;
+pub mod node;
 pub mod portforward;
 pub mod registries;
 mod ssh;

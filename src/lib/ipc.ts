@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BackupJob,
+  ClusterBackups,
+  NodeRestoreOutcome,
+  NodeRestoreRequest,
+  RebuildOutcome,
+  RebuildRequest,
   BackupSpec,
   LocalArchives,
   LocalBackupStatus,
@@ -137,6 +142,9 @@ export const localBackupStatus = () => invoke<LocalBackupStatus>("local_backup_s
 export const localBackupArchives = () => invoke<LocalArchives[]>("local_backup_archives");
 export const runLocalBackups = (jobs: BackupJob[]) => invoke<void>("run_local_backups", { jobs });
 export const openBackupFolder = (profileId: string | null) => invoke<void>("open_backup_folder", { profileId });
+export const clusterBackups = () => invoke<ClusterBackups>("cluster_backups");
+export const restoreNodeFiles = (request: NodeRestoreRequest) => invoke<NodeRestoreOutcome>("restore_node_files", { request });
+export const rebuildCluster = (request: RebuildRequest) => invoke<RebuildOutcome>("rebuild_cluster", { request });
 export const copyToCluster = (request: CopyRequest) => invoke<CopyOutcome>("copy_to_cluster", { request });
 export const setWorkloadDisabled = (kind: string, namespace: string, name: string, disabled: boolean) =>
   invoke<number>("set_workload_disabled", { kind, namespace, name, disabled });

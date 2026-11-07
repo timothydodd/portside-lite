@@ -158,6 +158,66 @@ impl Session {
         code.ok_or_else(|| err(format!("the connection closed while `{command}` was running")))
     }
 
+    /// Run a command and hand its stdout, as it arrives, to `on_stdout`
+    /// (binary-safe: tar streams, snapshots). A non-zero exit is an error
+    /// carrying stderr; so is an error from `on_stdout`, which stops reading.
+    pub async fn exec_to(&self, command: &str, stdin: Option<&str>, on_stdout: &mut (dyn FnMut(&[u8]) -> std::io::Result<()> + Send)) -> Result<()> {
+        let mut channel = self.handle.channel_open_session().await.map_err(err)?;
+        channel.exec(true, command).await.map_err(err)?;
+        if let Some(input) = stdin {
+            channel.data(format!("{input}\n").as_bytes()).await.map_err(err)?;
+        }
+        channel.eof().await.map_err(err)?;
+        let mut stderr = Vec::new();
+        let mut code = None;
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => on_stdout(&data).map_err(|e| err(format!("couldn't save the output of `{command}`: {e}")))?,
+                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                _ => {}
+            }
+        }
+        match code {
+            Some(0) => Ok(()),
+            None => Err(err(format!("the connection closed while `{command}` was running"))),
+            Some(c) => Err(err(format!("`{command}` exited with {c}: {}", String::from_utf8_lossy(&stderr).trim()))),
+        }
+    }
+
+    /// [`exec_to`](Self::exec_to) into memory.
+    pub async fn exec_bytes(&self, command: &str, stdin: Option<&str>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.exec_to(command, stdin, &mut |d| {
+            out.extend_from_slice(d);
+            Ok(())
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// Run a command with `input` as its stdin (then closed), e.g. `cat > file`.
+    pub async fn exec_with_input<R: tokio::io::AsyncRead + Unpin>(&self, command: &str, input: R) -> Result<()> {
+        let mut channel = self.handle.channel_open_session().await.map_err(err)?;
+        channel.exec(true, command).await.map_err(err)?;
+        channel.data(input).await.map_err(err)?;
+        channel.eof().await.map_err(err)?;
+        let mut stderr = Vec::new();
+        let mut code = None;
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                _ => {}
+            }
+        }
+        match code {
+            Some(0) => Ok(()),
+            None => Err(err(format!("the connection closed while `{command}` was running"))),
+            Some(c) => Err(err(format!("`{command}` exited with {c}: {}", String::from_utf8_lossy(&stderr).trim()))),
+        }
+    }
+
     /// Listen on 127.0.0.1:<random> and forward each connection to
     /// `remote_host:remote_port` as seen from the SSH server.
     pub async fn tunnel(self, remote_host: String, remote_port: u16) -> Result<Tunnel> {

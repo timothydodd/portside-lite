@@ -4,6 +4,8 @@
 //! [`Monitor::run_log_loop`] and forwards [`EventSink`] callbacks to the UI.
 
 pub mod backups;
+mod clusterbackup;
+pub mod rebuild;
 pub mod files;
 pub mod copydata;
 pub mod forwards;

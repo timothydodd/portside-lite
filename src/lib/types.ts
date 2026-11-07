@@ -11,7 +11,8 @@ export type ActionKind =
   | "scale"
   | "cordon"
   | "uncordon"
-  | "runBackup";
+  | "runBackup"
+  | "setUpBackup";
 
 export interface ConditionInfo {
   type: string;
@@ -107,6 +108,8 @@ export interface WorkloadInfo {
   lastSuccessfulMs: number | null;
   /** PersistentVolumeClaims its pods mount. */
   claims: string[];
+  /** hostPath folders its pods keep data in (out of reach of volume backups). */
+  hostPaths: string[];
 }
 
 export interface VolumeClaimInfo {
@@ -403,6 +406,8 @@ export interface JobRecord {
   lastSuccessMs: number | null;
   error: string | null;
   summary: string | null;
+  /** Parts the last successful run couldn't save. */
+  warning: string | null;
 }
 
 export interface ProfileBackupStatus {
@@ -547,6 +552,8 @@ export interface Settings {
   backupPullSchedule: string;
   /** Archives kept on this PC per volume backup; 0 = all. */
   backupKeepLocal: number;
+  /** Delete each archive from the cluster once its copy here is verified (SHA-256). */
+  backupPullRemove: boolean;
   /** Back up every connection's manifests and cluster-wide settings to this PC. */
   manifestBackup: boolean;
   manifestBackupSchedule: string;
@@ -554,6 +561,12 @@ export interface Settings {
   manifestBackupKeep: number;
   /** null = `backups` in the app data folder. */
   backupDir: string | null;
+  /** Seals Secret values etc. into cluster backups. SAVED_SECRET when one is saved; null = none. */
+  backupPassphrase: string | null;
+  /** Also snapshot the k3s datastore (SSH connections; needs the passphrase). */
+  backupDatastore: boolean;
+  /** Export images only the node has (SSH connections). */
+  backupImages: boolean;
 }
 
 // --- store ---------------------------------------------------------------
@@ -758,7 +771,8 @@ export interface ImportResult {
   kind: string;
   name: string;
   namespace: string | null;
-  outcome: "created" | "updated" | "error";
+  /** `skipped` (rebuilds only): left to k3s; `copied`: a claim's files were restored. */
+  outcome: "created" | "updated" | "error" | "skipped" | "copied";
   message: string | null;
 }
 
@@ -873,4 +887,91 @@ export interface LocalPathInfo {
   path: string;
   name: string;
   dir: boolean;
+}
+
+// --- cluster backups and rebuilds (portside-core/cluster_backup.rs, portside-monitor/rebuild.rs) ---
+
+export interface NodeSummary {
+  hostname: string;
+  k3sVersion: string | null;
+  datastore: string | null;
+  arch: string;
+  files: string[];
+  sealedFiles: string[];
+  leftOut: string[];
+  execStart: string | null;
+  agentImages: string[];
+}
+
+export interface BackupIndex {
+  version: number;
+  cluster: string;
+  clusterId: string;
+  takenMs: number;
+  serverVersion: string | null;
+  objects: number;
+  sealedSecrets: number;
+  sealed: boolean;
+  helmReleases: number;
+  customResources: number;
+  node: NodeSummary | null;
+  datastore: string | null;
+  images: { image: string; file: string }[];
+  volumeBackups: { namespace: string; name: string; claim: string }[];
+  skipped: string[];
+  warnings: string[];
+}
+
+export interface ClusterBackupEntry {
+  folder: string;
+  stamp: string;
+  /** null for backups made before backup.json existed. */
+  index: BackupIndex | null;
+  sealed: boolean;
+  takenMs: number | null;
+}
+
+export interface VolumeArchive {
+  namespace: string;
+  name: string;
+  file: string;
+  bytes: number;
+  modifiedMs: number | null;
+}
+
+export interface ClusterBackups {
+  root: string;
+  backups: ClusterBackupEntry[];
+  volumes: Record<string, VolumeArchive[]>;
+}
+
+export interface NodeRestoreRequest {
+  folder: string;
+  stamp: string;
+  targetProfileId: string;
+  passphrase: string | null;
+  restart: boolean;
+  jobId: string;
+}
+
+export interface NodeRestoreOutcome {
+  files: string[];
+  images: string[];
+  restarted: boolean;
+  k3sInstalled: boolean;
+}
+
+export interface RebuildRequest {
+  folder: string;
+  stamp: string;
+  targetProfileId: string;
+  passphrase: string | null;
+  volumes: boolean;
+  dryRun: boolean;
+  jobId: string;
+}
+
+export interface RebuildOutcome {
+  results: ImportResult[];
+  warnings: string[];
 }

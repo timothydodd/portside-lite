@@ -200,6 +200,9 @@ pub struct Settings {
     pub backup_pull_schedule: String,
     /// Archives kept on this PC per volume backup; 0 = all.
     pub backup_keep_local: u32,
+    /// Once an archive is on this PC and its SHA-256 matches the cluster's
+    /// copy, delete it from the cluster's backup claim (for nodes short on disk).
+    pub backup_pull_remove: bool,
     /// Back up every connection's manifests and cluster-wide settings to this PC.
     pub manifest_backup: bool,
     pub manifest_backup_schedule: String,
@@ -208,6 +211,14 @@ pub struct Settings {
     /// Where copied archives and manifest backups go; `None` = `backups` in
     /// the app's data folder.
     pub backup_dir: Option<String>,
+    /// Seals Secret values, Helm release records and node credentials into
+    /// cluster backups (`portside_secrets::sealed`). Unset = they're left
+    /// out. A secret: redacted for the UI like the connection secrets.
+    pub backup_passphrase: Option<String>,
+    /// Also save a snapshot of the k3s datastore (SSH connections; needs the passphrase).
+    pub backup_datastore: bool,
+    /// Export images only the node has (SSH connections).
+    pub backup_images: bool,
 }
 
 pub const DEFAULT_FILES_HELPER_IMAGE: &str = "busybox:1.37";
@@ -240,10 +251,14 @@ impl Default for Settings {
             backup_pull: true,
             backup_pull_schedule: DEFAULT_BACKUP_PULL_SCHEDULE.into(),
             backup_keep_local: 30,
+            backup_pull_remove: false,
             manifest_backup: true,
             manifest_backup_schedule: DEFAULT_MANIFEST_BACKUP_SCHEDULE.into(),
             manifest_backup_keep: 30,
             backup_dir: None,
+            backup_passphrase: None,
+            backup_datastore: false,
+            backup_images: true,
         }
     }
 }
@@ -412,6 +427,9 @@ impl Settings {
         for p in &mut s.connections {
             p.connection.redact();
         }
+        if let Some(v) = s.backup_passphrase.as_mut().filter(|v| !v.is_empty()) {
+            *v = SAVED_SECRET.into();
+        }
         s
     }
 
@@ -422,6 +440,17 @@ impl Settings {
             let old = prev.connections.iter().find(|o| o.id == p.id).map(|o| &o.connection);
             p.connection.restore_secrets(old);
         }
+        if self.backup_passphrase.as_deref() == Some(SAVED_SECRET) {
+            self.backup_passphrase = prev.backup_passphrase.clone().filter(|p| p != SAVED_SECRET);
+        }
+        if self.backup_passphrase.as_deref() == Some("") {
+            self.backup_passphrase = None;
+        }
+    }
+
+    /// The backup passphrase, if one is set.
+    pub fn passphrase(&self) -> Option<&str> {
+        self.backup_passphrase.as_deref().filter(|p| !p.is_empty() && *p != SAVED_SECRET)
     }
 
     /// Every set secret, for encrypting before the settings are stored.
@@ -435,6 +464,7 @@ impl Settings {
             }
             out.extend(s.sudo_password.as_mut());
         }
+        out.extend(self.backup_passphrase.as_mut());
         out
     }
 }
@@ -513,6 +543,23 @@ mod tests {
         let mut found: Vec<String> = s.secrets_mut().into_iter().map(|v| v.clone()).collect();
         found.sort();
         assert_eq!(found, ["login", "phrase", "sudo"]);
+    }
+
+    #[test]
+    fn backup_passphrase_is_a_secret() {
+        let prev = Settings { backup_passphrase: Some("open sesame".into()), ..Default::default() };
+        let r = prev.redacted();
+        assert_eq!(r.backup_passphrase.as_deref(), Some(SAVED_SECRET));
+        assert!(!serde_json::to_string(&r).unwrap().contains("open sesame"));
+        let mut back = r.clone();
+        back.restore_secrets(&prev);
+        assert_eq!(back.passphrase(), Some("open sesame"), "left as the placeholder: kept");
+        let mut cleared = r;
+        cleared.backup_passphrase = Some(String::new());
+        cleared.restore_secrets(&prev);
+        assert_eq!(cleared.backup_passphrase, None, "emptied: removed");
+        let mut s = prev.clone();
+        assert_eq!(s.secrets_mut().len(), 1, "encrypted at rest with the rest");
     }
 
     #[test]

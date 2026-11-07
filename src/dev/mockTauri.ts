@@ -279,12 +279,12 @@ const snapshot: ClusterSnapshot = {
   nodes,
   pods,
   workloads: [
-    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [] },
-    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [] },
-    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["data-postgres-0"] },
-    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, backupOffline: null, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["legacy-uploads"] },
-    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H, lastSuccessfulMs: now - 9 * H, claims: [] },
-    { kind: "CronJob", namespace: "apps", name: "portside-backup-legacy-uploads", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["curlimages/curl:8.16.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 10 * 86_400_000, schedule: "0 2 * * *", lastScheduleMs: now - 7 * H, lastSuccessfulMs: now - 7 * H, claims: ["legacy-uploads", "portside-backup-legacy-uploads"] },
+    { kind: "Deployment", namespace: "apps", name: "billing-api", desired: 2, ready: 1, available: 1, updated: 2, failed: 0, images: ["ghcr.io/example/billing-api:2.0.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [], hostPaths: [] },
+    { kind: "Deployment", namespace: "apps", name: "web-frontend", desired: 2, ready: 2, available: 2, updated: 2, failed: 0, images: ["ghcr.io/example/web:1.4.2"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 30 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: [], hostPaths: ["/srv/web-cache"] },
+    { kind: "StatefulSet", namespace: "data", name: "postgres", desired: 1, ready: 0, available: 0, updated: 1, failed: 0, images: ["postgres:16"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 1 * H, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["data-postgres-0"], hostPaths: [] },
+    { kind: "Deployment", namespace: "apps", name: "legacy-api", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/legacy:0.9"], paused: false, disabledReplicas: 3, backupOffline: null, conditionMessage: null, createdMs: now - 90 * 86_400_000, schedule: null, lastScheduleMs: null, lastSuccessfulMs: null, claims: ["legacy-uploads"], hostPaths: [] },
+    { kind: "CronJob", namespace: "apps", name: "nightly-report", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["ghcr.io/example/report:1.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 60 * 86_400_000, schedule: "0 3 * * *", lastScheduleMs: now - 9 * H, lastSuccessfulMs: now - 9 * H, claims: [], hostPaths: [] },
+    { kind: "CronJob", namespace: "apps", name: "portside-backup-legacy-uploads", desired: 0, ready: 0, available: 0, updated: 0, failed: 0, images: ["curlimages/curl:8.16.0"], paused: false, disabledReplicas: null, backupOffline: null, conditionMessage: null, createdMs: now - 10 * 86_400_000, schedule: "0 2 * * *", lastScheduleMs: now - 7 * H, lastSuccessfulMs: now - 7 * H, claims: ["legacy-uploads", "portside-backup-legacy-uploads"], hostPaths: [] },
   ],
   volumes: [
     { namespace: "data", name: "data-postgres-0", phase: "Bound", storageClass: "local-path", capacity: "20Gi", volumeName: "pvc-1f2e", createdMs: now - 30 * 86_400_000, accessModes: ["ReadWriteOnce"], mountedBy: ["postgres-0"], usedBy: ["StatefulSet/postgres"], writeBlockers: ["Pod postgres-0 has it mounted (Pending).", "StatefulSet postgres is at 1 replica. Scale it to 0."] },
@@ -378,10 +378,14 @@ let settings: Settings = {
   backupPull: true,
   backupPullSchedule: "0 7 * * *",
   backupKeepLocal: 30,
+  backupPullRemove: false,
   manifestBackup: true,
   manifestBackupSchedule: "0 3 * * *",
   manifestBackupKeep: 30,
   backupDir: null,
+  backupPassphrase: null,
+  backupDatastore: false,
+  backupImages: true,
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -523,8 +527,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
     activity: null,
     queued: 0,
     profiles: [
-      { profileId: "homelab", name: "Homelab", folder: "ssh_ops_k3s-server_22", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 3 * H, error: null, summary: "2 new archives (84.2 MB) from 2 backups" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: now - 7 * H, error: null, summary: "214 objects" }, running: null, queued: [] },
-      { profileId: "local", name: "Local dev", folder: "local_homelab-dev", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 27 * H, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: "nothing new from 1 backup" }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: null, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: null }, running: null, queued: [] },
+      { profileId: "homelab", name: "Homelab", folder: "ssh_ops_k3s-server_22", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 3 * H, error: null, summary: "2 new archives (84.2 MB) from 2 backups", warning: null }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: now - 7 * H, error: null, summary: "214 objects, 18 secrets sealed, node files, 1 node-only images", warning: "Couldn't export docker.io/library/tool:dev: exited with 1: image not found" }, running: null, queued: [] },
+      { profileId: "local", name: "Local dev", folder: "local_homelab-dev", pull: { lastAttemptMs: now - 3 * H, lastSuccessMs: now - 27 * H, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: "nothing new from 1 backup", warning: null }, manifests: { lastAttemptMs: now - 7 * H, lastSuccessMs: null, error: "Couldn't connect: kubeconfig: context homelab-dev not found", summary: null, warning: null }, running: null, queued: [] },
     ],
   }),
   local_backup_archives: () => [
@@ -532,6 +536,49 @@ const handlers: Record<string, (a: Args) => unknown> = {
     { namespace: "data", name: "data-postgres-0", count: 3, bytes: 3_100_000_000, newestMs: now - 9 * 86_400_000 },
   ],
   run_local_backups: () => null,
+  cluster_backups: () => ({
+    root: "C:\\Users\\you\\AppData\\Roaming\\portside-lite\\backups",
+    backups: [
+      {
+        folder: "ssh_ops_k3s-server_22", stamp: "2026-11-06_0300", sealed: true, takenMs: now - 7 * H,
+        index: {
+          version: 1, cluster: "Homelab", clusterId: "ssh:ops@k3s-server:22", takenMs: now - 7 * H, serverVersion: "v1.33.4+k3s1", objects: 214, sealedSecrets: 18, sealed: true,
+          helmReleases: 2, customResources: 9, datastore: null,
+          node: { hostname: "k3s-server", k3sVersion: "k3s version v1.33.4+k3s1 (demo)", datastore: "sqlite", arch: "x86_64", files: ["/etc/rancher/k3s/config.yaml", "/var/lib/rancher/k3s/server/manifests/traefik.yaml.skip"], sealedFiles: ["/etc/rancher/k3s/registries.yaml", "/var/lib/rancher/k3s/server/token"], leftOut: [], execStart: "/usr/local/bin/k3s server --write-kubeconfig-mode 644", agentImages: [] },
+          images: [{ image: "docker.io/library/tool:dev", file: "docker.io_library_tool_dev-0123456789ab.tar" }],
+          volumeBackups: [{ namespace: "apps", name: "legacy-uploads", claim: "legacy-uploads" }, { namespace: "data", name: "data-postgres-0", claim: "data-postgres-0" }],
+          skipped: [], warnings: [],
+        },
+      },
+      { folder: "ssh_ops_k3s-server_22", stamp: "2026-11-05_0300", sealed: true, takenMs: now - 31 * H, index: null },
+      { folder: "local_homelab-dev", stamp: "2026-10-30_0300", sealed: false, takenMs: now - 7 * 86_400_000, index: null },
+    ],
+    volumes: {
+      "ssh_ops_k3s-server_22": [
+        { namespace: "apps", name: "legacy-uploads", file: "legacy-uploads-20261106T020000Z.tar.gz", bytes: 42_000_000, modifiedMs: now - 3 * H },
+        { namespace: "data", name: "data-postgres-0", file: "data-postgres-0-20261028T020000Z.tar.gz", bytes: 1_100_000_000, modifiedMs: now - 9 * 86_400_000 },
+      ],
+    },
+  }),
+  restore_node_files: () => ({ files: ["/etc/rancher/k3s/config.yaml", "/etc/rancher/k3s/registries.yaml"], images: ["docker.io/library/tool:dev"], restarted: false, k3sInstalled: false }),
+  rebuild_cluster: (a) => {
+    const dry = (a.request as { dryRun: boolean }).dryRun;
+    const r = (index: number, kind: string, namespace: string | null, name: string, outcome: string, message: string | null = null) => ({ index, source: "", kind, namespace, name, outcome, message });
+    return {
+      results: [
+        r(0, "CustomResourceDefinition", null, "middlewares.traefik.io", "skipped", "the k3s Helm controller installs it from HelmChart traefik-crd"),
+        r(1, "Namespace", null, "apps", "created"),
+        r(2, "Secret", "apps", "billing-secrets", "created"),
+        r(3, "PersistentVolumeClaim", "apps", "legacy-uploads", "created"),
+        r(4, "Middleware", "apps", "strip-api", "created", dry ? "checked once its CRD exists" : null),
+        r(5, "Volume files", "apps", "legacy-uploads", "copied", "from legacy-uploads-20261106T020000Z.tar.gz (40.1 MB)"),
+        r(6, "Volume files", "data", "data-postgres-0", "error", "the claim wasn't created, so its files can't be restored"),
+        r(7, "Deployment", "apps", "web-frontend", "created"),
+        r(8, "Deployment", "kube-system", "coredns", "skipped", "k3s makes it from its own manifests"),
+      ],
+      warnings: [],
+    };
+  },
   open_backup_folder: () => null,
   run_backup_now: (a) => `portside-backup-${a.name}-${Math.floor(Date.now() / 1000)}`,
   set_backup_paused: () => null,

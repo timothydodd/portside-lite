@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, DatabaseBackup, FolderOpen, HardDrive, Laptop, Pause, Pencil, Play, RefreshCw, ScrollText, Settings2, Trash2 } from "lucide-react";
+import { AlertTriangle, DatabaseBackup, FolderOpen, HardDrive, Laptop, Pause, Pencil, Play, RefreshCw, RotateCcw, ScrollText, Settings2, Trash2 } from "lucide-react";
 import * as ipc from "../lib/ipc";
 import { confirmDestructive } from "../lib/dialog";
 import { backupForClaim, backupState, isBackupClaim, lastRunPod } from "../lib/backups";
 import { errorMessage, fmtAgo, fmtBytes } from "../lib/format";
 import { describeCron } from "../lib/schedule";
 import type { BackupInfo, BackupJob, ClusterSnapshot, JobRecord, LocalArchives, LocalBackupStatus, ProfileBackupStatus, VolumeClaimInfo } from "../lib/types";
+import RebuildDialog from "../components/RebuildDialog";
 import SnapshotGate from "../components/SnapshotGate";
 import { ActionMenu, EmptyState, Modal, NamespaceSelect, PageHeader, SearchInput, Spinner, StatusPill } from "../components/ui";
 import { useClusterStore } from "../stores/cluster";
@@ -129,6 +130,12 @@ function JobLine({ label, enabled, schedule, rec, state }: { label: string; enab
               <span className="line-clamp-2">{rec.error}</span>
             </span>
           )}
+          {!failed && rec.warning && (
+            <span className="mt-0.5 flex items-start gap-1 text-warning" title={rec.warning}>
+              <AlertTriangle size={12} className="mt-px shrink-0" />
+              <span className="line-clamp-2">{rec.warning}</span>
+            </span>
+          )}
           <span className="block text-[11px] text-content-muted">
             {describeCron(schedule)}
             {state && ` · ${state === "running" ? "running now" : "queued"}`}
@@ -147,6 +154,7 @@ function jobState(p: ProfileBackupStatus, job: BackupJob) {
 function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
   const settings = useClusterStore((s) => s.settings);
   const go = useNavStore((s) => s.go);
+  const [rebuilding, setRebuilding] = useState(false);
   if (!settings || !status) return null;
   const any = settings.backupPull || settings.manifestBackup;
   const runNow = async () => {
@@ -174,6 +182,9 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
               <RefreshCw size={12} /> Run now
             </button>
           )}
+          <button className="btn-chip" title="Put a cluster back from one of these backups, onto a new machine or this one" onClick={() => setRebuilding(true)}>
+            <RotateCcw size={12} /> Rebuild a cluster…
+          </button>
           <button className="btn-chip" title={status.folder} onClick={() => void ipc.openBackupFolder(null).catch((e) => toast.error(errorMessage(e)))}>
             <FolderOpen size={12} /> Open folder
           </button>
@@ -183,7 +194,7 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
         </span>
       </div>
       {!any ? (
-        <p className="text-xs text-content-muted">Copying volume backups and manifest backups to this PC are both off. Turn them on under Settings → Backups to this PC.</p>
+        <p className="text-xs text-content-muted">Copying volume backups and cluster backups to this PC are both off. Turn them on under Settings → Backups to this PC.</p>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-3">
           {status.profiles.map((p) => (
@@ -200,11 +211,12 @@ function LocalPanel({ status }: { status: LocalBackupStatus | null }) {
                 </button>
               </div>
               <JobLine label="Volume copies" enabled={settings.backupPull} schedule={settings.backupPullSchedule} rec={p.pull} state={jobState(p, "pull")} />
-              <JobLine label="Manifests" enabled={settings.manifestBackup} schedule={settings.manifestBackupSchedule} rec={p.manifests} state={jobState(p, "manifests")} />
+              <JobLine label="Cluster" enabled={settings.manifestBackup} schedule={settings.manifestBackupSchedule} rec={p.manifests} state={jobState(p, "manifests")} />
             </div>
           ))}
         </div>
       )}
+      {rebuilding && <RebuildDialog onClose={() => setRebuilding(false)} />}
     </div>
   );
 }

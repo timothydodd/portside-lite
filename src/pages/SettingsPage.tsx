@@ -414,6 +414,68 @@ function SecretInput({ value, placeholder, onChange }: { value: string | null; p
   );
 }
 
+/**
+ * The backup passphrase: typed twice, and only handed to the draft once both
+ * match (a typo would make every backup unopenable). A saved one arrives as
+ * SAVED_SECRET and stays unless changed or removed.
+ */
+function PassphraseInput({ value, saved, onChange }: { value: string | null; saved: string | null; onChange: (v: string | null) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [first, setFirst] = useState("");
+  const [second, setSecond] = useState("");
+  const isSaved = value === SAVED_SECRET;
+  useEffect(() => {
+    // After a save, the draft comes back as the placeholder: leave edit mode.
+    if (value === SAVED_SECRET || value === null) {
+      setEditing(false);
+      setFirst("");
+      setSecond("");
+    }
+  }, [saved]); // eslint-disable-line react-hooks/exhaustive-deps
+  const update = (a: string, b: string) => {
+    setFirst(a);
+    setSecond(b);
+    onChange(a.length >= 8 && a === b ? a : saved);
+  };
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className={`text-sm ${isSaved || value ? "text-content" : "text-content-muted"}`}>
+          {isSaved ? "Set" : value ? "Set (not saved yet)" : "None: Secret values aren't backed up"}
+        </span>
+        <button className="btn-ghost" onClick={() => setEditing(true)}>
+          {isSaved || value ? "Change…" : "Set…"}
+        </button>
+        {(isSaved || value) && (
+          <button className="btn-ghost" title="Stop sealing Secrets into backups" onClick={() => onChange(null)}>
+            Remove
+          </button>
+        )}
+      </div>
+    );
+  }
+  const problem = !first ? null : first.length < 8 ? "At least 8 characters." : second && first !== second ? "They don't match." : null;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex gap-2">
+        <input className="field min-w-0 flex-1" type="password" autoComplete="new-password" placeholder="New passphrase" value={first} onChange={(e) => update(e.target.value, second)} />
+        <input className="field min-w-0 flex-1" type="password" autoComplete="new-password" placeholder="Again" value={second} onChange={(e) => update(first, e.target.value)} />
+        <button
+          className="btn-ghost"
+          onClick={() => {
+            update("", "");
+            setEditing(false);
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+      {problem && <span className="text-xs text-warning">{problem}</span>}
+      {!problem && first && first === second && <span className="text-xs text-content-secondary">Saved with the settings. Older backups keep the passphrase they were made with.</span>}
+    </div>
+  );
+}
+
 function SshForm({ c, onChange }: { c: Extract<Connection, { mode: "ssh" }>; onChange: (c: Connection) => void }) {
   const up = (patch: Partial<SshConnection>) => onChange({ ...c, ...patch });
   return (
@@ -856,17 +918,29 @@ function LocalBackupsSection({ draft, set, saved }: { draft: Settings; set: (p: 
             suffix="newest archives per volume (0 = all)"
             onChange={(n) => set({ backupKeepLocal: n })}
           />
+          <label className="flex items-start gap-2 text-sm text-content">
+            <input type="checkbox" className="accent-brand mt-0.5" checked={draft.backupPullRemove} onChange={(e) => set({ backupPullRemove: e.target.checked })} />
+            <span>
+              Remove from the cluster once copied
+              <span className="block text-xs text-content-muted">
+                For nodes short on disk. After each archive is on this PC, its SHA-256 is checked against the cluster&apos;s copy, and only a match is
+                deleted there (a mismatch is copied again next time). Skipped while a backup run is using its storage. The backups then live only on
+                this PC, so keep this folder backed up too.
+              </span>
+            </span>
+          </label>
         </div>
       )}
 
       <label className="flex items-start gap-2 text-sm text-content">
         <input type="checkbox" className="accent-brand mt-0.5" checked={draft.manifestBackup} onChange={(e) => set({ manifestBackup: e.target.checked })} />
         <span>
-          Back up manifests and cluster settings
+          Back up each cluster
           <span className="block text-xs text-content-muted">
-            Workloads, Services, ConfigMaps, volume claims, ingresses and access rules in every namespace, plus cluster-wide settings (namespaces,
-            storage classes, cluster roles, CRDs, k3s Helm charts), as YAML you can bring back with Import. Secret values are never saved:
-            secrets-needed.md lists the Secrets to recreate.
+            Everything needed to rebuild it on a new machine (Backups → Rebuild a cluster): workloads, Services, config, volume claims, ingresses,
+            access rules, policies and quotas in every namespace; cluster-wide settings, static volumes, CRDs and every custom resource; Helm releases;
+            a list of the images in use. Through an SSH connection also the k3s server&apos;s own files: its config, registries, custom manifests and
+            install flags.
           </span>
         </span>
       </label>
@@ -880,6 +954,50 @@ function LocalBackupsSection({ draft, set, saved }: { draft: Settings; set: (p: 
             suffix="newest backups per connection (0 = all)"
             onChange={(n) => set({ manifestBackupKeep: n })}
           />
+          <Labeled
+            label="Backup passphrase"
+            hint={
+              <>
+                Seals Secret values, Helm release values and the node&apos;s credentials (join token, registry logins) into each backup. Without one
+                they&apos;re left out and secrets-needed.md lists what to recreate. <b>Write it down somewhere else</b>: a rebuild on a new PC needs it,
+                and nothing can open the sealed file without it. The file is standard{" "}
+                <span className="mono">age</span>, so <span className="mono">age -d</span> opens it too.
+              </>
+            }
+          >
+            <PassphraseInput value={draft.backupPassphrase} saved={saved?.backupPassphrase ?? null} onChange={(backupPassphrase) => set({ backupPassphrase })} />
+          </Labeled>
+          <label className="flex items-start gap-2 text-sm text-content">
+            <input type="checkbox" className="accent-brand mt-0.5" checked={draft.backupImages} onChange={(e) => set({ backupImages: e.target.checked })} />
+            <span>
+              Save images only the node has
+              <span className="block text-xs text-content-muted">
+                Images imported onto the node or set to never pull, which a new cluster couldn&apos;t download. Exported once each over SSH, next to the
+                backups.
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm text-content">
+            <input
+              type="checkbox"
+              className="accent-brand mt-0.5"
+              checked={draft.backupDatastore}
+              onChange={(e) => set({ backupDatastore: e.target.checked })}
+            />
+            <span>
+              Also snapshot the k3s datastore
+              <span className="block text-xs text-content-muted">
+                An exact copy of the cluster state (etcd snapshot or SQLite copy) plus the server token, sealed with the passphrase. A fallback for when
+                a rebuild from the manifests isn&apos;t enough; restoring it is done by hand (see the backup&apos;s README). Can be large, and every kept
+                backup has its own.
+              </span>
+              {draft.backupDatastore && !draft.backupPassphrase && (
+                <span className="mt-1 flex items-center gap-1 text-xs text-warning">
+                  <ShieldAlert size={12} /> Needs a backup passphrase.
+                </span>
+              )}
+            </span>
+          </label>
         </div>
       )}
 
@@ -890,7 +1008,7 @@ function LocalBackupsSection({ draft, set, saved }: { draft: Settings; set: (p: 
           </button>
           <span>
             {saved.backupPull && `Copies ${describeCron(saved.backupPullSchedule).toLowerCase()}. `}
-            {saved.manifestBackup && `Manifests ${describeCron(saved.manifestBackupSchedule).toLowerCase()}.`}
+            {saved.manifestBackup && `Cluster backups ${describeCron(saved.manifestBackupSchedule).toLowerCase()}.`}
           </span>
         </div>
       )}

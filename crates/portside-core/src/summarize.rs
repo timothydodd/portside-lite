@@ -483,6 +483,19 @@ fn images(spec: &Option<PodSpec>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// hostPath volumes that hold app data (see `cluster_backup::data_host_path`).
+fn host_paths(spec: &Option<PodSpec>) -> Vec<String> {
+    let mut out: Vec<String> = spec
+        .iter()
+        .flat_map(|s| s.volumes.iter().flatten())
+        .filter_map(|v| v.host_path.as_ref().map(|h| h.path.clone()))
+        .filter(|p| crate::cluster_backup::data_host_path(p))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The backup that scaled it to 0, while it's at 0.
 fn backup_offline(meta: &ObjectMeta, desired: i32) -> Option<String> {
     if desired != 0 {
@@ -524,6 +537,7 @@ fn deployment_info(d: &Deployment) -> WorkloadInfo {
         available: st.available_replicas.unwrap_or(0),
         updated: st.updated_replicas.unwrap_or(0),
         images: images(&spec.template.spec),
+        host_paths: host_paths(&spec.template.spec),
         paused: spec.paused.unwrap_or(false),
         disabled_replicas: disabled_replicas(&d.metadata, spec.replicas.unwrap_or(1)),
         backup_offline: backup_offline(&d.metadata, spec.replicas.unwrap_or(1)),
@@ -545,6 +559,7 @@ fn statefulset_info(s: &StatefulSet) -> WorkloadInfo {
         available: st.available_replicas.unwrap_or(0),
         updated: st.updated_replicas.unwrap_or(0),
         images: images(&spec.template.spec),
+        host_paths: host_paths(&spec.template.spec),
         disabled_replicas: disabled_replicas(&s.metadata, spec.replicas.unwrap_or(1)),
         backup_offline: backup_offline(&s.metadata, spec.replicas.unwrap_or(1)),
         created_ms: ms(&s.metadata.creation_timestamp),
@@ -564,6 +579,7 @@ fn daemonset_info(d: &DaemonSet) -> WorkloadInfo {
         available: st.number_available.unwrap_or(0),
         updated: st.updated_number_scheduled.unwrap_or(0),
         images: images(&spec.template.spec),
+        host_paths: host_paths(&spec.template.spec),
         created_ms: ms(&d.metadata.creation_timestamp),
         ..Default::default()
     }
@@ -591,6 +607,7 @@ fn job_info(j: &Job) -> WorkloadInfo {
         available: st.active.unwrap_or(0),
         failed: st.failed.unwrap_or(0),
         images: images(&spec.template.spec),
+        host_paths: host_paths(&spec.template.spec),
         paused: spec.suspend.unwrap_or(false),
         condition_message,
         created_ms: ms(&j.metadata.creation_timestamp),
@@ -612,6 +629,7 @@ fn cronjob_info(c: &CronJob) -> WorkloadInfo {
             .as_ref()
             .map(|s| images(&s.template.spec))
             .unwrap_or_default(),
+        host_paths: spec.job_template.spec.as_ref().map(|s| host_paths(&s.template.spec)).unwrap_or_default(),
         paused: spec.suspend.unwrap_or(false),
         schedule: Some(spec.schedule.clone()),
         last_schedule_ms: ms(&st.last_schedule_time),

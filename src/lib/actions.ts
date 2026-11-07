@@ -28,6 +28,7 @@ export const ACTION_LABELS: Record<ActionKind, string> = {
   cordon: "Cordon",
   uncordon: "Uncordon",
   runBackup: "Run backup now",
+  setUpBackup: "Set up a backup",
 };
 
 interface ScaleDialogState {
@@ -82,6 +83,9 @@ export async function runAction(action: ActionKind, t: ActionTarget): Promise<vo
       return;
     case "uncordon":
       await attempt(`Uncordoned ${t.name}`, () => ipc.setCordon(t.name, false));
+      return;
+    case "setUpBackup":
+      nav.openBackupSetup({ claim: { namespace: ns, name: t.name } });
       return;
     case "runBackup": {
       const name = backupNameOf(t.kind, t.name);

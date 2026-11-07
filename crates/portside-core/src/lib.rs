@@ -5,6 +5,7 @@
 pub mod alerts;
 pub mod archive;
 pub mod backup;
+pub mod cluster_backup;
 pub mod files;
 pub mod issues;
 pub mod k3s;

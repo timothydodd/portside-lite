@@ -7,8 +7,9 @@
 //! now. A failed run is retried an hour later rather than at every check.
 //!
 //! On disk, under the backup folder:
-//! `<cluster>/volumes/<namespace>/<backup>/<backup>-<UTC time>.tar.gz` and
-//! `<cluster>/manifests/<local time>/…` (see `manifests::manifest_backup`).
+//! `<cluster>/volumes/<namespace>/<backup>/<backup>-<UTC time>.tar.gz`,
+//! `<cluster>/manifests/<local time>/…` (cluster backups, see
+//! `clusterbackup.rs`) and `<cluster>/images/` (images only the node had).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 pub enum BackupJob {
     /// Copy volume backup archives to this PC.
     Pull,
+    /// A cluster backup: manifests, sealed secrets, node files, … (kept as
+    /// `manifests` in settings and records for compatibility).
     Manifests,
 }
 
@@ -51,6 +54,8 @@ pub struct JobRecord {
     pub error: Option<String>,
     /// What the last successful run did, in a few words.
     pub summary: Option<String>,
+    /// Parts the last successful run couldn't save (the rest was saved).
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -306,7 +311,11 @@ impl Monitor {
         *self.local_backups.activity.write().unwrap() = what;
     }
 
-    fn record(&self, profile_id: &str, job: BackupJob, started: i64, result: Result<String, String>) {
+    pub(crate) fn set_backup_activity(&self, what: String) {
+        self.set_activity(Some(what));
+    }
+
+    fn record(&self, profile_id: &str, job: BackupJob, started: i64, result: Result<(String, Vec<String>), String>) {
         let json = {
             let mut records = self.local_backups.records.lock().unwrap();
             let r = records.entry(profile_id.to_string()).or_default();
@@ -316,10 +325,11 @@ impl Monitor {
             };
             j.last_attempt_ms = Some(started);
             match result {
-                Ok(summary) => {
+                Ok((summary, warnings)) => {
                     j.last_success_ms = Some(started);
                     j.error = None;
                     j.summary = Some(summary);
+                    j.warning = (!warnings.is_empty()).then(|| warnings.join(" "));
                 }
                 Err(e) => j.error = Some(e),
             }
@@ -357,10 +367,10 @@ impl Monitor {
                     let folder = self.backup_root().join(Self::cluster_folder(p));
                     match item.job {
                         BackupJob::Manifests => {
-                            self.set_activity(Some(format!("Backing up {}'s manifests", p.name)));
-                            self.manifest_backup_once(cc, &p.name, &folder.join("manifests"), settings.manifest_backup_keep).await
+                            self.set_activity(Some(format!("Backing up {}", p.name)));
+                            self.cluster_backup_once(cc, p, &folder, &settings).await
                         }
-                        BackupJob::Pull => self.pull_backups(cc, &p.name, &folder.join("volumes"), &settings).await,
+                        BackupJob::Pull => self.pull_backups(cc, &p.name, &folder.join("volumes"), &settings).await.map(|s| (s, Vec::new())),
                     }
                 }
                 Err(e) => Err(e.clone()),
@@ -371,35 +381,19 @@ impl Monitor {
         self.set_activity(None);
     }
 
-    async fn manifest_backup_once(&self, cc: &ClusterClient, name: &str, dir: &Path, keep: u32) -> Result<String, String> {
-        let backup = portside_kube::manifests::manifest_backup(&cc.client, name, now_ms()).await.map_err(err)?;
-        let stamp = Local::now().format("%Y-%m-%d_%H%M").to_string();
-        let summary = match backup.skipped.len() {
-            0 => format!("{} objects", backup.objects),
-            n => format!("{} objects; {n} kinds left out (see README.md)", backup.objects),
-        };
-        let dir = dir.to_path_buf();
-        blocking(move || -> Result<(), String> {
-            write_folder(&dir, &stamp, &backup.files)?;
-            prune(&dir, keep, |e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'));
-            Ok(())
-        })
-        .await?;
-        Ok(summary)
-    }
-
     /// Copy every volume backup's archives that aren't here yet, then keep
     /// the newest `backup_keep_local` of each.
     async fn pull_backups(&self, cc: &ClusterClient, profile: &str, dir: &Path, settings: &Settings) -> Result<String, String> {
         let backups = portside_kube::backups::list_with_storage(&cc.client).await.map_err(err)?;
-        let (mut files, mut bytes, mut errors) = (0, 0, Vec::new());
+        let (mut files, mut bytes, mut removed, mut errors) = (0, 0, 0, Vec::new());
         for (ns, name) in &backups {
             self.set_activity(Some(format!("Copying backups of {ns}/{name} from {profile}")));
             let local = dir.join(safe_segment(ns)).join(safe_segment(name));
-            match self.pull_one(cc, ns, name, &local, &settings.files_helper_image).await {
-                Ok((n, b)) => {
+            match self.pull_one(cc, ns, name, &local, settings).await {
+                Ok((n, b, r)) => {
                     files += n;
                     bytes += b;
+                    removed += r;
                 }
                 Err(e) => errors.push(format!("{ns}/{name}: {e}")),
             }
@@ -413,11 +407,14 @@ impl Monitor {
             })
             .await;
         }
-        let summary = match (backups.len(), files) {
+        let mut summary = match (backups.len(), files) {
             (0, _) => "no volume backups with storage yet".to_string(),
             (n, 0) => format!("nothing new from {n} backup{}", if n == 1 { "" } else { "s" }),
             (n, f) => format!("{f} new archive{} ({}) from {n} backup{}", if f == 1 { "" } else { "s" }, mb(bytes), if n == 1 { "" } else { "s" }),
         };
+        if removed > 0 {
+            summary.push_str(&format!("; {removed} verified and removed from the cluster"));
+        }
         if errors.is_empty() {
             Ok(summary)
         } else {
@@ -425,15 +422,23 @@ impl Monitor {
         }
     }
 
-    async fn pull_one(&self, cc: &ClusterClient, ns: &str, name: &str, local: &Path, image: &str) -> Result<(usize, u64), String> {
+    /// Copy one backup's archives that aren't here yet. With
+    /// `backup_pull_remove`, each archive here whose SHA-256 matches the
+    /// cluster's copy is then deleted from the backup claim, as long as no
+    /// run is using it. Returns (files copied, bytes copied, files removed).
+    async fn pull_one(&self, cc: &ClusterClient, ns: &str, name: &str, local: &Path, settings: &Settings) -> Result<(usize, u64, usize), String> {
         let client = &cc.client;
+        let claim = object_name(name);
+        // Deleting needs a read-write helper, which is only safe between runs.
+        let removable = settings.backup_pull_remove
+            && kube_files::claim_users(client, ns, &claim).await.is_ok_and(|u| portside_core::backup::archives_removable(&u, name));
         // Its own owner, so it never takes an open file browser's helper for an orphan.
         let owner = format!("{}-pull", self.install_id);
-        let pod = kube_files::start_helper(client, ns, &object_name(name), image, None, true, &owner).await.map_err(err)?;
+        let pod = kube_files::start_helper(client, ns, &claim, &settings.files_helper_image, None, !removable, &owner).await.map_err(err)?;
         let result = async {
             let listing = kube_files::list(client, ns, &pod, "").await.map_err(err)?;
             tokio::fs::create_dir_all(local).await.map_err(|e| format!("Couldn't create {}: {e}", local.display()))?;
-            let (mut n, mut b) = (0, 0);
+            let (mut n, mut b, mut removed) = (0, 0, 0);
             let prefix = format!("{name}-");
             for e in listing.entries.iter().filter(|e| e.kind == "file" && e.name.starts_with(&prefix) && e.name.ends_with(ARCHIVE_SUFFIX)) {
                 // Names come from the cluster: only plain file names are written here.
@@ -441,51 +446,50 @@ impl Monitor {
                     continue;
                 }
                 let dest = local.join(&e.name);
-                if tokio::fs::metadata(&dest).await.is_ok_and(|m| m.len() == e.size) {
-                    continue;
+                if !tokio::fs::metadata(&dest).await.is_ok_and(|m| m.len() == e.size) {
+                    kube_files::download(client, ns, &pod, &e.name, false, &dest, &|_| {}).await.map_err(err)?;
+                    n += 1;
+                    b += e.size;
                 }
-                kube_files::download(client, ns, &pod, &e.name, false, &dest, &|_| {}).await.map_err(err)?;
-                n += 1;
-                b += e.size;
+                if removable {
+                    self.verify_and_remove(cc, ns, &pod, &e.name, &dest).await?;
+                    removed += 1;
+                }
             }
-            Ok::<_, String>((n, b))
+            Ok::<_, String>((n, b, removed))
         }
         .await;
         let _ = kube_files::stop_helper(client, ns, &pod).await;
         result
     }
-}
 
-/// Write `files` into `<dir>/<stamp>`: staged in a hidden folder, renamed
-/// into place once everything is written, so a half-written backup never
-/// looks like a finished one.
-fn write_folder(dir: &Path, stamp: &str, files: &[(String, String)]) -> Result<(), String> {
-    let io = |what: &str, p: &Path, e: std::io::Error| format!("Couldn't {what} {}: {e}", p.display());
-    let staging = dir.join(format!(".partial-{stamp}"));
-    let _ = std::fs::remove_dir_all(&staging);
-    for (rel, contents) in files {
-        // Paths are built from safe segments; refuse anything else outright.
-        if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == ".." || safe_segment(seg) != seg) {
-            return Err(format!("Refusing to write {rel}"));
+    /// Delete `file` from the claim only if the copy at `local` has the same SHA-256.
+    async fn verify_and_remove(&self, cc: &ClusterClient, ns: &str, pod: &str, file: &str, local: &Path) -> Result<(), String> {
+        let client = &cc.client;
+        let out = kube_files::run(client, ns, pod, portside_core::files::sha256_command(file)).await.map_err(err)?;
+        let remote = portside_core::files::parse_sha256(&String::from_utf8_lossy(&out)).ok_or_else(|| format!("Couldn't read the checksum of {file} on the cluster"))?;
+        let path = local.to_path_buf();
+        let here = blocking(move || -> std::io::Result<String> {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            std::io::copy(&mut std::fs::File::open(&path)?, &mut hasher)?;
+            Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        })
+        .await
+        .map_err(|e| format!("Couldn't read {}: {e}", local.display()))?;
+        if here != remote {
+            // A bad copy: drop it so the next run downloads it again; the cluster keeps its copy.
+            let _ = tokio::fs::remove_file(local).await;
+            return Err(format!("{file} copied to this PC doesn't match the cluster's (checksum differs); kept on the cluster, will copy again"));
         }
-        let path = staging.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io("create", parent, e))?;
-        }
-        std::fs::write(&path, contents).map_err(|e| io("write", &path, e))?;
+        kube_files::run(client, ns, pod, portside_core::files::remove_command(file)).await.map_err(|e| format!("{file} is safely on this PC, but couldn't be deleted from the cluster: {e}"))?;
+        Ok(())
     }
-    let mut target = dir.join(stamp);
-    let mut n = 2;
-    while target.exists() {
-        target = dir.join(format!("{stamp}-{n}"));
-        n += 1;
-    }
-    std::fs::rename(&staging, &target).map_err(|e| io("save", &target, e))
 }
 
 /// Keep the newest `keep` entries of `dir` that `matches` (by name, which
 /// sorts by time for these); 0 keeps everything.
-fn prune(dir: &Path, keep: u32, matches: impl Fn(&std::fs::DirEntry) -> bool) {
+pub(crate) fn prune(dir: &Path, keep: u32, matches: impl Fn(&std::fs::DirEntry) -> bool) {
     if keep == 0 {
         return;
     }
@@ -541,19 +545,15 @@ mod tests {
     }
 
     #[test]
-    fn writes_whole_folders_and_prunes() {
+    fn prunes_to_the_newest() {
         let dir = std::env::temp_dir().join(format!("portside-backups-test-{}", now_ms()));
-        let files = vec![("cluster/Namespace.yaml".to_string(), "a".to_string()), ("namespaces/shop/Deployment.yaml".to_string(), "b".to_string())];
-        for stamp in ["2026-10-01_0300", "2026-10-02_0300", "2026-10-03_0300"] {
-            write_folder(&dir, stamp, &files).unwrap();
+        for stamp in ["2026-10-01_0300", "2026-10-02_0300", "2026-10-03_0300", ".partial-x"] {
+            std::fs::create_dir_all(dir.join(stamp)).unwrap();
         }
-        write_folder(&dir, "2026-10-03_0300", &files).unwrap();
-        assert!(dir.join("2026-10-03_0300-2/namespaces/shop/Deployment.yaml").exists(), "same minute twice: kept apart");
-        assert!(write_folder(&dir, "x", &[("../evil".into(), String::new())]).is_err());
         prune(&dir, 2, |e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'));
-        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with('.')).collect();
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         left.sort();
-        assert_eq!(left, ["2026-10-03_0300", "2026-10-03_0300-2"]);
+        assert_eq!(left, [".partial-x", "2026-10-02_0300", "2026-10-03_0300"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

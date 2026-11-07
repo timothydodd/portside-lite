@@ -86,6 +86,15 @@ fn strip_cluster_assigned(obj: &mut Value) {
                 }
             }
         }
+        "PersistentVolume" => {
+            // Bind back to a claim of the same name, not the old claim's uid.
+            if let Some(Value::Object(r)) = obj.pointer_mut("/spec/claimRef") {
+                r.retain(|k, _| matches!(k.as_str(), "apiVersion" | "kind" | "namespace" | "name"));
+            }
+            if let Some(Value::Object(ann)) = obj.pointer_mut("/metadata/annotations") {
+                ann.remove("pv.kubernetes.io/bound-by-controller");
+            }
+        }
         "ServiceAccount" => {
             if let Some(o) = obj.as_object_mut() {
                 o.remove("secrets"); // auto-generated token references

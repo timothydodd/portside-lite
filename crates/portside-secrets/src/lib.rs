@@ -1,9 +1,12 @@
-//! Protects saved credentials at rest.
+//! Protects saved credentials at rest, and seals backup files with a
+//! passphrase ([`sealed`]).
 //!
 //! On Windows this is DPAPI (`CryptProtectData`, current-user scope): only the
 //! same Windows account on the same machine can decrypt, so a copied database
 //! file is useless elsewhere. Other platforms have no protection here;
 //! [`protect`] returns `None` and callers keep the value as it was.
+
+pub mod sealed;
 
 /// Marks a value produced by [`protect`].
 const PREFIX: &str = "dpapi:";

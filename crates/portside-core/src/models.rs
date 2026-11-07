@@ -173,6 +173,10 @@ pub struct WorkloadInfo {
     /// PersistentVolumeClaims its pods mount (StatefulSet template claims
     /// included), for the Files tab.
     pub claims: Vec<String>,
+    /// hostPath folders its pods keep data in: on the node's disk, out of
+    /// reach of volume backups.
+    #[serde(default)]
+    pub host_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -458,6 +462,8 @@ pub enum ActionKind {
     Uncordon,
     /// Start a volume backup now (the issue's object is its CronJob or one of its Jobs).
     RunBackup,
+    /// Set up a volume backup for the issue's PersistentVolumeClaim.
+    SetUpBackup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

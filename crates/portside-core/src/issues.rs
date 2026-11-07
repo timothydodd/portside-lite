@@ -716,6 +716,65 @@ fn detect_left_offline(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
     }
 }
 
+/// A claim in use with no volume backup: rebuilding the cluster would bring
+/// it back empty. Backup claims themselves and the cluster's own namespaces
+/// are left out.
+fn detect_unbacked_volumes(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for v in &snap.volumes {
+        if v.phase != "Bound" || v.name.starts_with(crate::backup::OBJECT_PREFIX) || v.namespace == "kube-system" {
+            continue;
+        }
+        let backed_up = snap.backups.iter().any(|b| b.namespace == v.namespace && b.spec.as_ref().is_some_and(|s| s.claim == v.name));
+        if backed_up {
+            continue;
+        }
+        let users = if v.used_by.is_empty() { "Nothing uses it right now.".to_string() } else { format!("Used by {}.", v.used_by.join(", ")) };
+        out.push(Issue {
+            key: format!("volume-not-backed-up:PersistentVolumeClaim/{}/{}", v.namespace, v.name),
+            severity: Severity::Info,
+            category: "storage".into(),
+            rule: "volume-not-backed-up".into(),
+            kind: "PersistentVolumeClaim".into(),
+            namespace: Some(v.namespace.clone()),
+            name: v.name.clone(),
+            title: format!("Volume has no backup: {}", v.name),
+            detail: format!("{users} If the cluster is lost, a rebuild brings this claim back empty."),
+            hint: Some("Set up a volume backup for it, and turn on copying volume backups to this PC (Settings) so a copy lives off the cluster.".into()),
+            since_ms: v.created_ms,
+            actions: vec![ActionKind::SetUpBackup],
+            first_seen_ms: None,
+        });
+    }
+}
+
+/// A workload keeping data in a hostPath folder: on the node's own disk,
+/// where neither volume backups nor a rebuild can reach it.
+fn detect_host_path_data(snap: &ClusterSnapshot, out: &mut Vec<Issue>) {
+    for w in &snap.workloads {
+        if w.host_paths.is_empty() || w.kind == "Job" || w.namespace == "kube-system" {
+            continue;
+        }
+        out.push(Issue {
+            key: format!("hostpath-data:{}/{}/{}", w.kind, w.namespace, w.name),
+            severity: Severity::Info,
+            category: "storage".into(),
+            rule: "hostpath-data".into(),
+            kind: w.kind.clone(),
+            namespace: Some(w.namespace.clone()),
+            name: w.name.clone(),
+            title: format!("Data on the node's disk: {}", w.name),
+            detail: format!(
+                "It keeps files in {} on the node (hostPath). Volume backups can't copy these, and a rebuilt cluster starts without them.",
+                w.host_paths.join(", ")
+            ),
+            hint: Some("Move the data to a PersistentVolumeClaim (local-path works on a single node) and back that up, or back up the folder on the node yourself.".into()),
+            since_ms: None,
+            actions: vec![],
+            first_seen_ms: None,
+        });
+    }
+}
+
 fn fmt_hours(ms: i64) -> String {
     let h = ms / 3_600_000;
     if h >= 48 {
@@ -907,6 +966,8 @@ pub fn detect(snap: &ClusterSnapshot, settings: &Settings, now_ms: i64) -> Vec<I
     detect_accounts(snap, &mut out);
     detect_backups(snap, now_ms, &mut out);
     detect_left_offline(snap, &mut out);
+    detect_unbacked_volumes(snap, &mut out);
+    detect_host_path_data(snap, &mut out);
     detect_events(snap, now_ms, &mut out);
     sort_dedupe(&mut out);
     out
@@ -1131,6 +1192,36 @@ mod tests {
         assert_eq!(rules(vec![cron.clone(), failed.clone()]), ["job-failed"]);
         assert!(rules(vec![cron, failed.clone(), later_ok.clone()]).is_empty());
         assert_eq!(rules(vec![failed, later_ok]), ["job-failed"], "a standalone Job stays until it's deleted");
+    }
+
+    #[test]
+    fn volumes_without_backups_and_host_path_data() {
+        let spec = crate::backup::sample_spec();
+        let claim = |ns: &str, name: &str, phase: &str| VolumeClaimInfo { namespace: ns.into(), name: name.into(), phase: phase.into(), ..Default::default() };
+        let backup = BackupInfo { namespace: spec.namespace.clone(), name: spec.name.clone(), spec: Some(spec.clone()), ..Default::default() };
+        let mut web = workload("Deployment", "web", 1, 1);
+        web.host_paths = vec!["/srv/web".into()];
+        let mut job = workload("Job", "once", 1, 1);
+        job.host_paths = vec!["/srv/x".into()];
+        let snap = ClusterSnapshot {
+            volumes: vec![
+                claim(&spec.namespace, &spec.claim, "Bound"),
+                claim(&spec.namespace, "cache", "Bound"),
+                claim(&spec.namespace, "new", "Pending"),
+                claim(&spec.namespace, &crate::backup::object_name(&spec.name), "Bound"),
+                claim("kube-system", "x", "Bound"),
+            ],
+            backups: vec![backup],
+            workloads: vec![web, job],
+            ..Default::default()
+        };
+        let issues = detect(&snap, &Settings::default(), NOW);
+        let keys: Vec<&str> = issues.iter().filter(|i| i.rule != "pvc-pending").map(|i| i.key.as_str()).collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.contains(&format!("volume-not-backed-up:PersistentVolumeClaim/{}/cache", spec.namespace).as_str()));
+        assert!(keys.iter().any(|k| k.starts_with("hostpath-data:Deployment/")));
+        let unbacked = issues.iter().find(|i| i.rule == "volume-not-backed-up").unwrap();
+        assert_eq!((unbacked.severity, &unbacked.actions[..]), (Severity::Info, &[ActionKind::SetUpBackup][..]));
     }
 
     #[test]
