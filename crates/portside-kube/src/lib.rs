@@ -137,8 +137,19 @@ pub fn sudo_command(command: &str, has_password: bool) -> String {
     if !has_password {
         return command.to_string();
     }
-    let args: Vec<&str> = rest.split_whitespace().filter(|a| *a != "-n" && *a != "-S").collect();
-    format!("sudo -S -p '' {}", args.join(" "))
+    // Only sudo's own leading `-n`/`-S` go; the command after them is kept byte for
+    // byte (multi-line `sh -c` scripts, `head -n 1` and the like).
+    let mut rest = rest.trim_start();
+    loop {
+        let flag = ["-n", "-S"].into_iter().find(|f| {
+            rest.strip_prefix(f).is_some_and(|after| after.starts_with(char::is_whitespace))
+        });
+        match flag {
+            Some(f) => rest = rest[f.len()..].trim_start(),
+            None => break,
+        }
+    }
+    format!("sudo -S -p '' {rest}")
 }
 
 /// Contexts in a local kubeconfig and which one is current, for the settings UI.
@@ -171,5 +182,12 @@ mod tests {
         assert_eq!(sudo_command(default, true), "sudo -S -p '' cat /etc/rancher/k3s/k3s.yaml");
         assert_eq!(sudo_command("sudo k3s kubectl config view --raw", true), "sudo -S -p '' k3s kubectl config view --raw");
         assert_eq!(sudo_command("cat ~/k3s.yaml", true), "cat ~/k3s.yaml", "non-sudo commands pass through");
+        let script = "sudo sh -c 'a=1\nk3s --version | head -n 1\nexit 0\n'";
+        assert_eq!(
+            sudo_command(script, true),
+            "sudo -S -p '' sh -c 'a=1\nk3s --version | head -n 1\nexit 0\n'",
+            "the command after sudo's flags is kept as is"
+        );
+        assert_eq!(sudo_command("sudo -n -S ls -n", true), "sudo -S -p '' ls -n");
     }
 }
